@@ -15,6 +15,7 @@ EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_USERNAME = os.getenv("EMAIL_USERNAME")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
+SITE_NAME = os.getenv("SITE_NAME", "IELTS Practice")
 
 # Print debug information
 print(f"Email Configuration Debug:")
@@ -107,14 +108,14 @@ def send_password_reset_email(to_email: str, reset_token: str, username: str, fr
     reset_link = f"{frontend_url}/reset-password?token={reset_token}"
     
        # Email content
-    subject = "thiieltstrenmay.com - Đặt Lại Mật Khẩu"
+    subject = f"{SITE_NAME} - Đặt Lại Mật Khẩu"
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-            <h2 style="color: #4a86e8;">thiieltstrenmay.com - Đặt Lại Mật Khẩu</h2>
+            <h2 style="color: #4a86e8;">{SITE_NAME} - Đặt Lại Mật Khẩu</h2>
             <p>Xin chào {username},</p>
-            <p>Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản thiieltstrenmay.com của bạn.</p>
+            <p>Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản {SITE_NAME} của bạn.</p>
             <p>Để đặt lại mật khẩu, vui lòng nhấp vào liên kết dưới đây:</p>
             <p>
                 <a href="{reset_link}" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
@@ -123,7 +124,7 @@ def send_password_reset_email(to_email: str, reset_token: str, username: str, fr
             </p>
             <p>Liên kết này sẽ hết hạn sau 30 phút.</p>
             <p>Nếu bạn không yêu cầu đặt lại mật khẩu, vui lòng bỏ qua email này hoặc liên hệ với bộ phận hỗ trợ nếu bạn có thắc mắc.</p>
-            <p>Xin cảm ơn,<br>Đội ngũ thiieltstrenmay.com</p>
+            <p>Xin cảm ơn,<br>Đội ngũ {SITE_NAME}</p>
         </div>
     </body>
     </html>
@@ -147,14 +148,14 @@ def send_account_created_email(to_email: str, username: str, frontend_url: str) 
     
     # Email content
         # Email content
-    subject = "thiieltstrenmay.com - Tài Khoản Đã Được Tạo"
+    subject = f"{SITE_NAME} - Tài Khoản Đã Được Tạo"
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-            <h2 style="color: #4a86e8;">Chào mừng đến với thiieltstrenmay.com!</h2>
+            <h2 style="color: #4a86e8;">Chào mừng đến với {SITE_NAME}!</h2>
             <p>Xin chào {username},</p>
-            <p>Chúng tôi rất vui mừng thông báo rằng tài khoản thiieltstrenmay.com của bạn đã được tạo thành công.</p>
+            <p>Chúng tôi rất vui mừng thông báo rằng tài khoản {SITE_NAME} của bạn đã được tạo thành công.</p>
             <p>Bạn có thể đăng nhập ngay bây giờ để truy cập tất cả các tài nguyên luyện thi IELTS của chúng tôi.</p>
             <p>
                 <a href="{login_link}" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
@@ -162,7 +163,7 @@ def send_account_created_email(to_email: str, username: str, frontend_url: str) 
                 </a>
             </p>
             <p>Nếu bạn có bất kỳ câu hỏi hoặc cần hỗ trợ, vui lòng liên hệ với đội ngũ hỗ trợ của chúng tôi.</p>
-            <p>Xin cảm ơn,<br>Đội ngũ thiieltstrenmay.com</p>
+            <p>Xin cảm ơn,<br>Đội ngũ {SITE_NAME}</p>
         </div>
     </body>
     </html>

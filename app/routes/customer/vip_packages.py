@@ -236,8 +236,8 @@ async def purchase_package(
     
     # Create PayOS payment link
     try:
-        return_url = os.getenv("PAYOS_RETURN_URL", "https://thiieltstrenmay.com/payment-success")
-        cancel_url = os.getenv("PAYOS_CANCEL_URL", "https://thiieltstrenmay.com/payment-cancel")
+        return_url = os.getenv("PAYOS_RETURN_URL", "")
+        cancel_url = os.getenv("PAYOS_CANCEL_URL", "")
         
         # PayOS description max 25 chars - strip "(XX ngày)" suffix
         clean_name = package.name.split("(")[0].strip()
