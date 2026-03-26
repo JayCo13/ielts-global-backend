@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+.env.*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Static files (uploaded by users - don't push to git)
+static/student_images/
+static/audio/
+static/uploads/
+static/payments/
+static/speaking_pdfs/
+static/notification_images/
+static/feedback_images/
+
+# Alembic
+alembic/versions/__pycache__/
+
+# Misc
+*.log
+codebase.md
+=11.0.3
+=12.0

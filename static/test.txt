@@ -1,0 +1,237 @@
+import React, { useState } from 'react';
+import { AlertCircle, Check, X } from 'lucide-react';
+import { toast } from 'react-toastify';
+
+const PackageFormModal = ({ onClose, onSuccess, isCreate, packageData }) => {
+  const [formData, setFormData] = useState({
+    name: packageData?.name || '',
+    duration_months: packageData?.duration_months || 1,
+    price: packageData?.price || 0,
+    description: packageData?.description || '',
+    is_active: packageData?.is_active !== undefined ? packageData.is_active : true,
+    package_type: packageData?.package_type || 'all_skills',
+    skill_type: packageData?.skill_type || null
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setFormData({
+      ...formData,
+      [name]: type === 'checkbox' ? checked : value
+    });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+
+    try {
+      const url = isCreate 
+        ? 'http://localhost:8000/admin/vip/packages' 
+        : `http://localhost:8000/admin/vip/packages/${packageData.package_id}`;
+      
+      const method = isCreate ? 'POST' : 'PUT';
+      
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
+        body: JSON.stringify({
+          name: formData.name,
+          duration_months: parseInt(formData.duration_months),
+          price: parseFloat(formData.price),
+          description: formData.description || null,
+          is_active: formData.is_active,
+          package_type: formData.package_type,
+          skill_type: formData.package_type === 'single_skill' ? formData.skill_type : null
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to save package');
+      }
+
+      toast.success(isCreate ? 'Package created successfully!' : 'Package updated successfully!');
+      onSuccess();
+    } catch (err) {
+      setError(err.message);
+      toast.error(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
+        <div className="flex justify-between items-center p-4 border-b">
+          <h2 className="text-xl font-semibold text-gray-800">
+            {isCreate ? 'Create New Package' : 'Edit Package'}
+          </h2>
+          <button 
+            onClick={onClose}
+            className="text-gray-500 hover:text-gray-700"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="p-4">
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-md">
+              <div className="flex items-center">
+                <AlertCircle className="h-5 w-5 text-red-500 mr-2" />
+                <p className="text-sm text-red-600">{error}</p>
+              </div>
+            </div>
+          )}
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Package Name*
+            </label>
+            <input
+              type="text"
+              name="name"
+              value={formData.name}
+              onChange={handleChange}
+              required
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+              placeholder="e.g. Premium Monthly"
+            />
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Package Type*
+            </label>
+            <select
+              name="package_type"
+              value={formData.package_type}
+              onChange={handleChange}
+              required
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+            >
+              <option value="all_skills">All Skills</option>
+              <option value="single_skill">Single Skill</option>
+            </select>
+          </div>
+          
+          {formData.package_type === 'single_skill' && (
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Skill Type*
+              </label>
+              <select
+                name="skill_type"
+                value={formData.skill_type || ''}
+                onChange={handleChange}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+              >
+                <option value="">Select a skill</option>
+                <option value="reading">Reading</option>
+                <option value="writing">Writing</option>
+                <option value="listening">Listening</option>
+              </select>
+            </div>
+          )}
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Duration (months)*
+            </label>
+            <input
+              type="number"
+              name="duration_months"
+              value={formData.duration_months}
+              onChange={handleChange}
+              required
+              min="1"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+            />
+          </div>
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Price ($)*
+            </label>
+            <input
+              type="number"
+              name="price"
+              value={formData.price}
+              onChange={handleChange}
+              required
+              min="0"
+              step="0.01"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+            />
+          </div>
+          
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Description
+            </label>
+            <textarea
+              name="description"
+              value={formData.description}
+              onChange={handleChange}
+              rows="3"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent"
+              placeholder="Package description (optional)"
+            />
+          </div>
+          
+          <div className="mb-4 flex items-center">
+            <input
+              type="checkbox"
+              name="is_active"
+              id="is_active"
+              checked={formData.is_active}
+              onChange={handleChange}
+              className="h-4 w-4 text-violet-600 focus:ring-violet-500 border-gray-300 rounded"
+            />
+            <label htmlFor="is_active" className="ml-2 block text-sm text-gray-700">
+              Active
+            </label>
+          </div>
+          
+          <div className="flex justify-end space-x-3 mt-6">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 bg-violet-600 text-white rounded-md text-sm font-medium hover:bg-violet-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-violet-500 flex items-center"
+            >
+              {loading ? (
+                <>
+                  <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent mr-2"></div>
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Check size={18} className="mr-2" />
+                  {isCreate ? 'Create Package' : 'Update Package'}
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+export default PackageFormModal;
