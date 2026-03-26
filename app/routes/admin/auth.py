@@ -831,7 +831,7 @@ async def logout(
 @router.get("/google-auth")
 async def google_auth(request: Request):
     """Initiates the Google OAuth flow"""
-    callback_uri = f"{request.base_url.scheme}://{request.base_url.netloc}/google-callback"
+    callback_uri = GOOGLE_REDIRECT_URI or f"{request.base_url.scheme}://{request.base_url.netloc}/google-callback"
     
     params = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -853,7 +853,7 @@ async def google_callback(
 ):
     """Handles the Google OAuth callback"""
     try:
-        callback_uri = f"{request.base_url.scheme}://{request.base_url.netloc}/google-callback"
+        callback_uri = GOOGLE_REDIRECT_URI or f"{request.base_url.scheme}://{request.base_url.netloc}/google-callback"
         
         # Exchange code for token
         token_response = requests.post(
