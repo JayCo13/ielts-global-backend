@@ -845,10 +845,9 @@ async def get_exam_audio_part(
             detail=f"No audio file found for exam {exam_id} part {part_number}"
         )
     
-    # If audio is stored in R2, redirect to R2 URL
+    # If audio is stored in R2, return the URL for direct access
     if listening_media.audio_url:
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url=listening_media.audio_url, status_code=302)
+        return {"audio_url": listening_media.audio_url, "type": "r2"}
     
     if not listening_media.audio_file:
         raise HTTPException(
