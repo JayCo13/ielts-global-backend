@@ -339,8 +339,9 @@ class ListeningMedia(Base):
 
     media_id = Column(Integer, primary_key=True, index=True)
     section_id = Column(Integer, ForeignKey("exam_sections.section_id"))
-    audio_file = Column(LONGBLOB)  # Changed to LONGBLOB for large files
+    audio_file = Column(LONGBLOB, nullable=True)  # Legacy: kept for backward compat
     audio_filename = Column(String(255))
+    audio_url = Column(String(500), nullable=True)  # R2 public URL
     transcript = Column(LONGTEXT)
     duration = Column(Integer)
 

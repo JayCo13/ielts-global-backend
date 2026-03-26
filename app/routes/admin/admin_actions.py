@@ -1243,12 +1243,18 @@ async def update_listening_part_with_audio(
                         'required_choices': 2,
                     })
 
+    # Upload audio to R2
+    from app.utils.r2_storage import upload_audio_to_r2
+    r2_key = f"exam_{exam_id}_part_{part_number}_{audio_filename}"
+    audio_url = upload_audio_to_r2(audio_content, r2_key)
+
     # Add new listening media
     formatted_transcript = transcript.strip().replace('\r\n', '\n') if transcript else None
     listening_media = ListeningMedia(
         section_id=section.section_id,
-        audio_file=audio_content,
+        audio_file=None,
         audio_filename=audio_filename,
+        audio_url=audio_url,
         transcript=formatted_transcript,
         duration=section.duration
     )
@@ -1390,12 +1396,18 @@ async def update_listening_part(
                     })
 
 
+    # Upload audio to R2
+    from app.utils.r2_storage import upload_audio_to_r2
+    r2_key = f"exam_{exam_id}_part_{part_number}_{audio_filename}"
+    audio_url = upload_audio_to_r2(audio_content, r2_key)
+
     # Add new listening media
     formatted_transcript = transcript.strip().replace('\r\n', '\n') if transcript else None
     listening_media = ListeningMedia(
         section_id=section.section_id,
-        audio_file=audio_content,
+        audio_file=None,
         audio_filename=audio_filename,
+        audio_url=audio_url,
         transcript=formatted_transcript,
         duration=section.duration
     )

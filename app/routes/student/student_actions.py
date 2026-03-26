@@ -184,6 +184,24 @@ async def stream_combined_audio(
             detail="No audio files found for this exam"
         )
     
+    # Check if audio is stored in R2 (new approach)
+    if listening_media_files[0].audio_url:
+        # Return R2 URLs for frontend to play directly
+        audio_parts = []
+        for i, media in enumerate(listening_media_files):
+            audio_parts.append({
+                "part_number": i + 1,
+                "audio_url": media.audio_url,
+                "duration": media.duration or 0
+            })
+        
+        return {
+            "type": "r2_urls",
+            "exam_id": exam_id,
+            "parts": audio_parts
+        }
+    
+    # Legacy: Stream from LONGBLOB (backward compatibility)
     # Create temporary files for each audio part
     temp_files = []
     total_duration = 0
@@ -821,7 +839,18 @@ async def get_exam_audio_part(
             ExamSection.order_number == part_number
         ).first()
     
-    if not listening_media or not listening_media.audio_file:
+    if not listening_media:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No audio file found for exam {exam_id} part {part_number}"
+        )
+    
+    # If audio is stored in R2, redirect to R2 URL
+    if listening_media.audio_url:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=listening_media.audio_url, status_code=302)
+    
+    if not listening_media.audio_file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No audio file found for exam {exam_id} part {part_number}"
@@ -912,18 +941,27 @@ async def get_audio_file_lengths(
     total_length = 0
     
     for i, media in enumerate(listening_media):
-        if media.audio_file:
-            # Create a BytesIO object from the audio data
+        # If audio is on R2, use stored duration
+        if media.audio_url:
+            length = media.duration or 0
+            total_length += length
+            part_lengths.append({
+                "part_number": i + 1,
+                "length": length,
+                "length_formatted": f"{length // 60}:{length % 60:02d}",
+                "audio_url": media.audio_url
+            })
+        elif media.audio_file:
+            # Legacy: read from LONGBLOB
             audio_data = io.BytesIO(media.audio_file)
-            # Load the MP3 file and get its length
             try:
                 audio = MP3(audio_data)
-                length = int(audio.info.length)  # Length in seconds
+                length = int(audio.info.length)
                 total_length += length
                 part_lengths.append({
                     "part_number": i + 1,
                     "length": length,
-                    "length_formatted": f"{length // 60}:{length % 60:02d}"  # MM:SS format
+                    "length_formatted": f"{length // 60}:{length % 60:02d}"
                 })
             except Exception as e:
                 part_lengths.append({

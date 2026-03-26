@@ -21,3 +21,4 @@ websockets>=12.0
 slowapi>=0.1.8
 redis>=5.0.1
 payos>=0.1.0
+boto3>=1.34.0
