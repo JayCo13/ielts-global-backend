@@ -184,37 +184,39 @@ async def stream_combined_audio(
             detail="No audio files found for this exam"
         )
     
-    # Check if audio is stored in R2 (new approach)
-    if listening_media_files[0].audio_url:
-        # Return R2 URLs for frontend to play directly
-        audio_parts = []
-        for i, media in enumerate(listening_media_files):
-            audio_parts.append({
-                "part_number": i + 1,
-                "audio_url": media.audio_url,
-                "duration": media.duration or 0
-            })
-        
-        return {
-            "type": "r2_urls",
-            "exam_id": exam_id,
-            "parts": audio_parts
-        }
-    
-    # Legacy: Stream from LONGBLOB (backward compatibility)
-    # Create temporary files for each audio part
+    import requests as http_requests
+
+    # Download audio files (from R2 URL or LONGBLOB)
     temp_files = []
     total_duration = 0
     for media in listening_media_files:
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        temp_file.write(media.audio_file)
+        
+        if media.audio_url:
+            # Download from R2
+            r2_response = http_requests.get(media.audio_url)
+            temp_file.write(r2_response.content)
+        elif media.audio_file:
+            # Legacy: from LONGBLOB
+            temp_file.write(media.audio_file)
+        else:
+            temp_file.close()
+            continue
+            
         temp_file.close()
         temp_files.append(temp_file.name)
         
-        # Calculate duration of each audio file
-        audio_data = io.BytesIO(media.audio_file)
-        audio = MP3(audio_data)
-        total_duration += audio.info.length
+        # Calculate duration
+        try:
+            audio_data_file = open(temp_file.name, "rb")
+            audio = MP3(audio_data_file)
+            total_duration += audio.info.length
+            audio_data_file.close()
+        except Exception:
+            pass
+    
+    if not temp_files:
+        raise HTTPException(status_code=404, detail="No playable audio files found")
     
     # Create a temporary file for the combined audio
     combined_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
@@ -277,7 +279,7 @@ async def stream_combined_audio(
         "Accept-Ranges": "bytes",
         "Content-Length": str(content_length),
         "Content-Type": "audio/mpeg",
-        "Content-Disposition": f"inline; filename=exam_{exam_id}_combined.mp3",  # Changed to inline
+        "Content-Disposition": f"inline; filename=exam_{exam_id}_combined.mp3",
         "X-Total-Duration": str(int(total_duration))
     }
     
