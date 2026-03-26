@@ -126,6 +126,38 @@ async def update_package(
     db.commit()
     return {"message": "Package updated successfully"}
 
+@router.delete("/packages/{package_id}", response_model=dict)
+async def delete_package(
+    package_id: int,
+    current_admin = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """Delete a VIP package"""
+    package = db.query(VIPPackage).filter(VIPPackage.package_id == package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+    
+    # Check for active subscriptions
+    active_subs = db.query(VIPSubscription).filter(
+        VIPSubscription.package_id == package_id,
+        VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+        VIPSubscription.payment_status == "completed"
+    ).count()
+    
+    if active_subs > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Không thể xóa gói đang có {active_subs} đăng ký hoạt động"
+        )
+    
+    # Delete related transactions and subscriptions first
+    db.query(PackageTransaction).filter(PackageTransaction.package_id == package_id).delete()
+    db.query(VIPSubscription).filter(VIPSubscription.package_id == package_id).delete()
+    db.delete(package)
+    db.commit()
+    
+    return {"message": "Package deleted successfully"}
+
 @router.get("/subscriptions", response_model=List[dict])
 async def get_all_subscriptions(
     current_admin = Depends(get_current_admin),
