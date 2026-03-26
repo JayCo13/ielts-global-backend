@@ -938,20 +938,37 @@ async def get_audio_file_lengths(
             detail="No audio files found for this exam"
         )
     
+    import requests as http_requests
+
     part_lengths = []
     total_length = 0
     
     for i, media in enumerate(listening_media):
-        # If audio is on R2, use stored duration
         if media.audio_url:
-            length = media.duration or 0
-            total_length += length
-            part_lengths.append({
-                "part_number": i + 1,
-                "length": length,
-                "length_formatted": f"{length // 60}:{length % 60:02d}",
-                "audio_url": media.audio_url
-            })
+            # Download from R2 and compute real duration
+            try:
+                r2_response = http_requests.get(media.audio_url)
+                audio_data = io.BytesIO(r2_response.content)
+                audio = MP3(audio_data)
+                length = int(audio.info.length)
+                total_length += length
+                part_lengths.append({
+                    "part_number": i + 1,
+                    "length": length,
+                    "length_formatted": f"{length // 60}:{length % 60:02d}",
+                    "audio_url": media.audio_url
+                })
+                # Update DB duration if inaccurate
+                if media.duration != length:
+                    media.duration = length
+                    db.add(media)
+            except Exception as e:
+                part_lengths.append({
+                    "part_number": i + 1,
+                    "length": 0,
+                    "length_formatted": "00:00",
+                    "error": str(e)
+                })
         elif media.audio_file:
             # Legacy: read from LONGBLOB
             audio_data = io.BytesIO(media.audio_file)
@@ -971,6 +988,12 @@ async def get_audio_file_lengths(
                     "length_formatted": "00:00",
                     "error": str(e)
                 })
+    
+    # Commit any duration updates
+    try:
+        db.commit()
+    except Exception:
+        pass
     
     # Prepare result
     result = {
