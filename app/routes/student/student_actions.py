@@ -161,7 +161,8 @@ async def get_student_profile(
         "username": current_student.username,
         "email": current_student.email,
         "image_url": image_url,
-        "role": current_student.role  # Include role for frontend verification
+        "role": current_student.role,  # Include role for frontend verification
+        "is_google_account": bool(current_student.google_id)  # True if registered via Google
     }
 @router.get("/exam/{exam_id}/audio")
 async def stream_combined_audio(
