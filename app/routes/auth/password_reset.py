@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from jose import jwt, JWTError
 import os
 from app.utils.email_utils import send_password_reset_email
-from app.routes.admin.auth import pwd_context, SECRET_KEY, ALGORITHM, create_access_token
+from app.routes.admin.auth import pwd_context, SECRET_KEY, ALGORITHM, create_access_token, get_current_student
 from app.utils.datetime_utils import get_vietnam_time
 from typing import Optional
 
@@ -152,4 +152,51 @@ async def verify_reset_token(token: str):
         return {"valid": True, "username": username, "email": email}
         
     except JWTError:
-        return {"valid": False} 
+        return {"valid": False}
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(..., min_length=6)
+    confirm_password: str
+
+
+@router.post("/change-password", response_model=dict)
+async def change_password(
+    request: ChangePasswordRequest,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Change password for the currently logged-in user.
+    Requires the current password for verification.
+    """
+    # Verify passwords match
+    if request.new_password != request.confirm_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu mới không khớp"
+        )
+
+    # Verify current password
+    if not pwd_context.verify(request.current_password, current_user.password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu hiện tại không đúng"
+        )
+
+    # Don't allow same password
+    if request.current_password == request.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Mật khẩu mới phải khác mật khẩu hiện tại"
+        )
+
+    # Update the password
+    current_user.password = pwd_context.hash(request.new_password)
+    current_user.last_active = get_vietnam_time().replace(tzinfo=None)
+    db.commit()
+
+    return {
+        "message": "Đổi mật khẩu thành công"
+    }
