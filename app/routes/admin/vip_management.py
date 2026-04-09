@@ -194,7 +194,7 @@ async def get_all_subscriptions(
                 "payment_method": transaction.payment_method,
                 "status": transaction.status,
                 "admin_note": transaction.admin_note,
-                "payos_order_code": transaction.payos_order_code,
+                "paypal_order_id": transaction.paypal_order_id,
                 "created_at": transaction.created_at
             }
         

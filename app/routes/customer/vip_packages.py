@@ -9,6 +9,8 @@ from pydantic import BaseModel
 import os
 from uuid import uuid4
 from app.utils.datetime_utils import get_vietnam_time
+import logging
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class PackageResponse(BaseModel):
@@ -128,10 +130,9 @@ async def purchase_package(
     current_user: User = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    """Create a PayOS payment link for a VIP package purchase."""
+    """Create a PayPal order for a VIP package purchase."""
     import os
-    import time
-    from app.utils.payos_service import create_payment_link
+    from app.utils.paypal_service import create_order
 
     package = db.query(VIPPackage).filter(
         VIPPackage.package_id == package_id,
@@ -149,27 +150,26 @@ async def purchase_package(
     recent_count = db.query(PackageTransaction).filter(
         PackageTransaction.user_id == current_user.user_id,
         PackageTransaction.created_at >= five_min_ago,
-        PackageTransaction.status != "reject"  # Don't count cancelled attempts
+        PackageTransaction.status != "reject"
     ).count()
     
     if recent_count >= 20:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Bạn đã tạo quá nhiều yêu cầu thanh toán. Vui lòng thử lại sau."
+            detail="Too many payment requests. Please try again later."
         )
     
-    # Cancel existing pending PayOS transactions for same user+package (they may have expired on PayOS side)
+    # Cancel existing pending PayPal transactions for same user+package
     existing_pending = db.query(PackageTransaction).filter(
         PackageTransaction.user_id == current_user.user_id,
         PackageTransaction.package_id == package_id,
         PackageTransaction.status == "pending",
-        PackageTransaction.payment_method == "payos",
+        PackageTransaction.payment_method == "paypal",
     ).all()
     
     for old_txn in existing_pending:
         old_txn.status = "reject"
-        old_txn.admin_note = "Tự động hủy: tạo giao dịch mới"
-        # Also cancel the linked subscription
+        old_txn.admin_note = "Auto-cancelled: new transaction created"
         if old_txn.subscription_id:
             old_sub = db.query(VIPSubscription).filter(
                 VIPSubscription.subscription_id == old_txn.subscription_id
@@ -179,7 +179,7 @@ async def purchase_package(
     if existing_pending:
         db.commit()
     
-    # Subscription stacking logic (unchanged from original)
+    # Subscription stacking logic (unchanged)
     if package.package_type == "single_skill":
         active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
             VIPSubscription.user_id == current_user.user_id,
@@ -216,61 +216,142 @@ async def purchase_package(
     db.commit()
     db.refresh(subscription)
     
-    # Generate unique order code for PayOS (must be a unique positive integer)
-    order_code = int(f"{int(time.time())}{subscription.subscription_id}")
-    
     # Create transaction record
     transaction = PackageTransaction(
         user_id=current_user.user_id,
         package_id=package_id,
         subscription_id=subscription.subscription_id,
         amount=package.price,
-        payment_method="payos",
+        payment_method="paypal",
         status="pending",
-        payos_order_code=order_code,
         created_at=get_vietnam_time().replace(tzinfo=None)
     )
     db.add(transaction)
     db.commit()
     db.refresh(transaction)
     
-    # Create PayOS payment link
+    # Create PayPal order
     try:
-        return_url = os.getenv("PAYOS_RETURN_URL", "")
-        cancel_url = os.getenv("PAYOS_CANCEL_URL", "")
+        return_url = os.getenv("PAYPAL_RETURN_URL", "")
+        cancel_url = os.getenv("PAYPAL_CANCEL_URL", "")
         
-        # PayOS description max 25 chars - strip "(XX ngày)" suffix
-        clean_name = package.name.split("(")[0].strip()
-        description = clean_name[:25]
-        
-        payos_response = create_payment_link(
-            order_code=order_code,
-            amount=int(package.price),
-            description=description,
+        paypal_order = create_order(
+            amount_usd=float(package.price),
+            description=f"VIP Package: {package.name}",
             return_url=return_url,
             cancel_url=cancel_url,
+            custom_id=str(transaction.transaction_id),
         )
         
-        checkout_url = payos_response.checkout_url
-        
-        # Save checkout URL for reference
-        transaction.payos_checkout_url = checkout_url
+        # Save PayPal order ID
+        transaction.paypal_order_id = paypal_order["id"]
         db.commit()
         
         return {
-            "message": "Payment link created successfully",
+            "message": "PayPal order created successfully",
             "transaction_id": transaction.transaction_id,
-            "checkoutUrl": checkout_url,
+            "paypal_order_id": paypal_order["id"],
+            "approve_url": paypal_order.get("approve_url"),
             "status": "pending"
         }
     except Exception as e:
-        # If PayOS fails, clean up
+        # If PayPal fails, clean up
         db.delete(transaction)
         db.delete(subscription)
         db.commit()
+        logger.error(f"PayPal order creation failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Không thể tạo liên kết thanh toán. Vui lòng thử lại sau."
+            detail="Failed to create payment. Please try again later."
+        )
+
+
+@router.post("/packages/{package_id}/capture", response_model=dict)
+async def capture_payment(
+    package_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Capture a PayPal payment after user approval.
+    Called by frontend after PayPal onApprove callback.
+    """
+    from app.utils.paypal_service import capture_order
+    
+    body = await request.json()
+    paypal_order_id = body.get("paypal_order_id")
+    
+    if not paypal_order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing paypal_order_id"
+        )
+    
+    # Find the transaction
+    transaction = db.query(PackageTransaction).filter(
+        PackageTransaction.paypal_order_id == paypal_order_id,
+        PackageTransaction.user_id == current_user.user_id,
+    ).first()
+    
+    if not transaction:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transaction not found"
+        )
+    
+    # Idempotency: if already completed, return success
+    if transaction.status == "completed":
+        return {
+            "message": "Payment already completed",
+            "transaction_id": transaction.transaction_id,
+            "status": "completed"
+        }
+    
+    # Capture the payment on PayPal
+    try:
+        capture_result = capture_order(paypal_order_id)
+        
+        if capture_result["status"] == "COMPLETED":
+            # Payment successful — activate VIP
+            transaction.status = "completed"
+            transaction.admin_note = f"PayPal capture: {capture_result.get('capture_id', 'N/A')}"
+            
+            subscription = db.query(VIPSubscription).filter(
+                VIPSubscription.subscription_id == transaction.subscription_id
+            ).first()
+            
+            if subscription:
+                subscription.payment_status = "completed"
+            
+            user = db.query(User).filter(
+                User.user_id == transaction.user_id
+            ).first()
+            
+            if user and subscription:
+                user.is_vip = True
+                if user.vip_expiry is None or subscription.end_date > user.vip_expiry:
+                    user.vip_expiry = subscription.end_date
+            
+            db.commit()
+            
+            return {
+                "message": "Payment completed successfully! VIP activated.",
+                "transaction_id": transaction.transaction_id,
+                "status": "completed"
+            }
+        else:
+            # Payment not completed
+            return {
+                "message": f"Payment status: {capture_result['status']}",
+                "transaction_id": transaction.transaction_id,
+                "status": capture_result["status"].lower()
+            }
+    except Exception as e:
+        logger.error(f"PayPal capture failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment capture failed. Please contact support."
         )
 
 @router.get("/subscription/history", response_model=List[dict])

@@ -297,8 +297,12 @@ async def get_student_test_statistics(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    # Get all exam results for the current student
-    exam_results = db.query(ExamResult).filter(
+    from sqlalchemy.sql import func
+    
+    # 1) Get all exam results with exam titles in ONE query (joinedload)
+    exam_results = db.query(ExamResult).options(
+        joinedload(ExamResult.exam)
+    ).filter(
         ExamResult.user_id == current_student.user_id
     ).order_by(ExamResult.completion_date.desc()).all()
     
@@ -315,90 +319,104 @@ async def get_student_test_statistics(
             "section_scores": latest_result.section_scores
         }
     
-    # Calculate statistics for listening exams
+    # 2) Batch load: which exam_ids are listening exams? (ONE query)
+    all_exam_ids = list(set(r.exam_id for r in exam_results))
+    listening_exam_ids = set()
+    if all_exam_ids:
+        listening_sections = db.query(ExamSection.exam_id).filter(
+            ExamSection.exam_id.in_(all_exam_ids),
+            ExamSection.section_type == 'listening'
+        ).distinct().all()
+        listening_exam_ids = set(row[0] for row in listening_sections)
+    
+    # 3) Batch load: listening answer stats per (exam_id, result_id) (ONE query)
+    listening_result_ids = [r.result_id for r in exam_results if r.exam_id in listening_exam_ids]
+    answer_stats = {}  # result_id -> (correct_count, total_count)
+    if listening_result_ids:
+        stats_rows = db.query(
+            ListeningAnswer.result_id,
+            func.sum(func.IF(ListeningAnswer.score > 0, 1, 0)).label('correct'),
+            func.count(ListeningAnswer.answer_id).label('total')
+        ).filter(
+            ListeningAnswer.result_id.in_(listening_result_ids)
+        ).group_by(ListeningAnswer.result_id).all()
+        for rid, correct, total in stats_rows:
+            answer_stats[rid] = (int(correct), int(total))
+    
+    # Build listening statistics from pre-loaded data
     listening_exams = []
-    listening_accuracy = 0
-    listening_avg_score = 0
     listening_total_questions = 0
     listening_correct_answers = 0
     
     for result in exam_results:
-        # Check if this is a listening exam
-        exam_sections = db.query(ExamSection).filter(
-            ExamSection.exam_id == result.exam_id
-        ).all()
+        if result.exam_id not in listening_exam_ids:
+            continue
+        correct_count, total_questions = answer_stats.get(result.result_id, (0, 0))
+        exam_accuracy = (correct_count / total_questions * 100) if total_questions > 0 else 0
         
-        is_listening_exam = any(section.section_type == 'listening' for section in exam_sections)
-        
-        if is_listening_exam:
-            # Get answers for this exam
-            answers = db.query(ListeningAnswer).filter(
-                ListeningAnswer.exam_id == result.exam_id,
-                ListeningAnswer.user_id == current_student.user_id
-            ).all()
-            
-            # Calculate accuracy for this exam
-            correct_count = sum(1 for answer in answers if answer.score > 0)
-            total_questions = len(answers)
-            
-            if total_questions > 0:
-                exam_accuracy = (correct_count / total_questions) * 100
-            else:
-                exam_accuracy = 0
-                
-            listening_exams.append({
-                "result_id": result.result_id,
-                "exam_id": result.exam_id,
-                "exam_title": result.exam.title,
-                "total_score": result.total_score,
-                "accuracy": exam_accuracy,
-                "completion_date": result.completion_date
-            })
-            
-            # Accumulate for overall statistics
-            listening_total_questions += total_questions
-            listening_correct_answers += correct_count
+        listening_exams.append({
+            "result_id": result.result_id,
+            "exam_id": result.exam_id,
+            "exam_title": result.exam.title,
+            "total_score": result.total_score,
+            "accuracy": exam_accuracy,
+            "completion_date": result.completion_date
+        })
+        listening_total_questions += total_questions
+        listening_correct_answers += correct_count
     
     # Calculate overall listening statistics
+    listening_accuracy = 0
+    listening_avg_score = 0
     if listening_total_questions > 0:
         listening_accuracy = (listening_correct_answers / listening_total_questions) * 100
-        listening_avg_score = sum(exam["total_score"] for exam in listening_exams) / len(listening_exams)
+        listening_avg_score = sum(e["total_score"] for e in listening_exams) / len(listening_exams)
     
-    # Get writing test statistics
+    # 4) Writing stats: batch load all tasks + answers (TWO queries instead of 3N)
+    all_writing_tasks = db.query(WritingTask).all()
+    all_task_ids = [t.task_id for t in all_writing_tasks]
+    
+    user_writing_answers = []
+    if all_task_ids:
+        user_writing_answers = db.query(WritingAnswer).filter(
+            WritingAnswer.task_id.in_(all_task_ids),
+            WritingAnswer.user_id == current_student.user_id
+        ).all()
+    
+    # Group tasks and answers by test_id
+    tasks_by_test = {}
+    for t in all_writing_tasks:
+        tasks_by_test.setdefault(t.test_id, []).append(t)
+    
+    answers_by_task = {a.task_id: a for a in user_writing_answers}
+    
+    # Build exam title lookup from already-loaded data + batch query for writing exams
+    writing_test_ids = [tid for tid in tasks_by_test.keys() 
+                        if any(t.task_id in answers_by_task for t in tasks_by_test[tid])]
+    exam_titles = {}
+    if writing_test_ids:
+        title_rows = db.query(Exam.exam_id, Exam.title).filter(
+            Exam.exam_id.in_(writing_test_ids)
+        ).all()
+        exam_titles = {eid: title for eid, title in title_rows}
+    
     writing_tests = []
     writing_tasks_completed = 0
     
-    # Fix: Get distinct test_ids first instead of using GROUP BY
-    test_ids = db.query(WritingTask.test_id).distinct().all()
-    test_ids = [test_id[0] for test_id in test_ids]
-    
-    for test_id in test_ids:
-        # Get all tasks for this test
-        tasks = db.query(WritingTask).filter(
-            WritingTask.test_id == test_id
-        ).all()
+    for test_id, tasks in tasks_by_test.items():
+        task_ids = [t.task_id for t in tasks]
+        test_answers = [answers_by_task[tid] for tid in task_ids if tid in answers_by_task]
         
-        # Get answers for these tasks
-        task_ids = [task.task_id for task in tasks]
-        answers = db.query(WritingAnswer).filter(
-            WritingAnswer.task_id.in_(task_ids),
-            WritingAnswer.user_id == current_student.user_id
-        ).all()
-        
-        if answers:
-            # This test has been attempted
-            test = db.query(Exam).filter(Exam.exam_id == test_id).first()
-            
+        if test_answers:
             writing_tests.append({
                 "test_id": test_id,
-                "title": test.title,
-                "parts_completed": len(answers),
+                "title": exam_titles.get(test_id, ""),
+                "parts_completed": len(test_answers),
                 "total_parts": len(tasks),
-                "is_completed": len(answers) == len(tasks),
-                "latest_update": max(answer.updated_at for answer in answers)
+                "is_completed": len(test_answers) == len(tasks),
+                "latest_update": max(a.updated_at for a in test_answers)
             })
-            
-            writing_tasks_completed += len(answers)
+            writing_tasks_completed += len(test_answers)
     
     return {
         "total_exams_completed": len(exam_results),
@@ -415,6 +433,7 @@ async def get_student_test_statistics(
             "tests": writing_tests
         }
     }
+
 @router.put("/profile", response_model=dict)
 async def update_student_profile(
     email: str = Form(None),
@@ -455,104 +474,147 @@ async def get_available_listening_exams(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    # Query exams that have listening sections
-    query = db.query(Exam).join(ExamSection)\
-        .filter(
-            Exam.is_active == True,
-            ExamSection.section_type == 'listening'
+    # 1) Get all active exams with listening sections (ONE query)
+    exams = db.query(Exam).join(ExamSection).filter(
+        Exam.is_active == True,
+        ExamSection.section_type == 'listening'
+    ).distinct().all()
+
+    if not exams:
+        return []
+
+    exam_ids = [e.exam_id for e in exams]
+    
+    # 2) Batch load all access types for these exams (ONE query)
+    all_access_types = db.query(ExamAccessType).filter(
+        ExamAccessType.exam_id.in_(exam_ids)
+    ).all()
+    access_by_exam = {}
+    for a in all_access_types:
+        access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
+    
+    # 3) Batch load all listening sections (ONE query)
+    all_sections = db.query(ExamSection).filter(
+        ExamSection.exam_id.in_(exam_ids),
+        ExamSection.section_type == 'listening'
+    ).order_by(ExamSection.order_number).all()
+    sections_by_exam = {}
+    for s in all_sections:
+        sections_by_exam.setdefault(s.exam_id, []).append(s)
+    
+    # 4) Batch load latest non-forecast results (ONE query with window function alternative)
+    from sqlalchemy.sql import func
+    latest_results_sub = db.query(
+        ExamResult.exam_id,
+        func.max(ExamResult.completion_date).label('max_date')
+    ).filter(
+        ExamResult.exam_id.in_(exam_ids),
+        ExamResult.user_id == current_student.user_id,
+        ExamResult.is_forecast.in_([False, None])
+    ).group_by(ExamResult.exam_id).subquery()
+    
+    latest_results = db.query(ExamResult).join(
+        latest_results_sub,
+        and_(
+            ExamResult.exam_id == latest_results_sub.c.exam_id,
+            ExamResult.completion_date == latest_results_sub.c.max_date
         )
+    ).filter(
+        ExamResult.user_id == current_student.user_id
+    ).all()
+    results_by_exam = {r.exam_id: r for r in latest_results}
 
-    exams = query.distinct().all()
+    # Determine allowed access types
+    allowed_types = []
+    if current_student.role == 'student':
+        allowed_types = ['student']
+    elif current_student.role == 'customer':
+        if current_student.is_vip:
+            allowed_types = ['no vip', 'vip']
+        else:
+            allowed_types = ['no vip']
 
+    # Build response using pre-loaded data
     exam_details = []
     for exam in exams:
-        # Get exam access types
-        exam_access_types = db.query(ExamAccessType)\
-            .filter(ExamAccessType.exam_id == exam.exam_id)\
-            .all()
-        
-        # Determine allowed access types based on user role
-        allowed_types = []
-        if current_student.role == 'student':
-            allowed_types = ['student']
-        elif current_student.role == 'customer':
-            if current_student.is_vip:
-                allowed_types = ['no vip', 'vip']
-            else:
-                allowed_types = ['no vip']
-        
-        # Check if any of the exam's access types match the user's allowed types
-        exam_types = [access.access_type for access in exam_access_types]
-        has_access = any(access_type in allowed_types for access_type in exam_types)
-        
-        if not has_access:
+        exam_types = access_by_exam.get(exam.exam_id, [])
+        if not any(at in allowed_types for at in exam_types):
             continue
         
-        listening_section = db.query(ExamSection).filter(
-            ExamSection.exam_id == exam.exam_id,
-            ExamSection.section_type == 'listening'
-        ).first()
+        sections = sections_by_exam.get(exam.exam_id, [])
+        if not sections:
+            continue
         
-        # Get all listening sections for part titles
-        all_listening_sections = db.query(ExamSection).filter(
-            ExamSection.exam_id == exam.exam_id,
-            ExamSection.section_type == 'listening'
-        ).order_by(ExamSection.order_number).all()
+        first_section = sections[0]
+        part_titles = {}
+        for s in sections:
+            if s.part_title:
+                part_titles[s.order_number] = s.part_title
         
-        # Find the latest non-forecast exam result for this exam
-        latest_non_forecast = db.query(ExamResult).filter(
-            ExamResult.exam_id == exam.exam_id,
-            ExamResult.user_id == current_student.user_id,
-            ExamResult.is_forecast.in_([False, None])  # Only full tests
-        ).order_by(ExamResult.completion_date.desc()).first()
-
-        if listening_section:
-            part_titles = {}
-            for s in all_listening_sections:
-                if s.part_title:
-                    part_titles[s.order_number] = s.part_title
-            
-            exam_details.append({
-                "exam_id": exam.exam_id,
-                "title": exam.title,
-                "created_at": exam.created_at,
-                "duration": listening_section.duration,
-                "total_marks": listening_section.total_marks,
-                "is_completed": latest_non_forecast is not None,
-                "total_score": latest_non_forecast.total_score if latest_non_forecast else 0,
-                "part_titles": part_titles
-            })
+        latest = results_by_exam.get(exam.exam_id)
+        
+        exam_details.append({
+            "exam_id": exam.exam_id,
+            "title": exam.title,
+            "created_at": exam.created_at,
+            "duration": first_section.duration,
+            "total_marks": first_section.total_marks,
+            "is_completed": latest is not None,
+            "total_score": latest.total_score if latest else 0,
+            "part_titles": part_titles
+        })
 
     return exam_details
+
 
 @router.get("/writing/forecasts", response_model=List[dict])
 async def get_writing_forecasts(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Exam).join(ExamSection).filter(
+    # 1) Get all active exams with essay sections
+    exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'essay'
-    )
-    exams = query.distinct().all()
+    ).distinct().all()
 
+    if not exams:
+        return []
+
+    exam_ids = [e.exam_id for e in exams]
+
+    # 2) Batch load access types (ONE query)
+    all_access = db.query(ExamAccessType).filter(
+        ExamAccessType.exam_id.in_(exam_ids)
+    ).all()
+    access_by_exam = {}
+    for a in all_access:
+        access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
+
+    # 3) Batch load all forecast writing tasks (ONE query)
+    all_forecast_tasks = db.query(WritingTask).filter(
+        WritingTask.test_id.in_(exam_ids),
+        WritingTask.is_forecast == True
+    ).order_by(WritingTask.part_number).all()
+    tasks_by_exam = {}
+    for t in all_forecast_tasks:
+        tasks_by_exam.setdefault(t.test_id, []).append(t)
+
+    # Determine allowed access types
+    allowed_types = []
+    if current_student.role == 'student':
+        allowed_types = ['student']
+    elif current_student.role == 'customer':
+        allowed_types = ['no vip', 'vip'] if current_student.is_vip else ['no vip']
+
+    # Build response using pre-loaded data
     result = []
     for exam in exams:
-        exam_access_types = db.query(ExamAccessType).filter(ExamAccessType.exam_id == exam.exam_id).all()
-        allowed_types = []
-        if current_student.role == 'student':
-            allowed_types = ['student']
-        elif current_student.role == 'customer':
-            allowed_types = ['no vip', 'vip'] if current_student.is_vip else ['no vip']
-        exam_types = [access.access_type for access in exam_access_types]
-        has_access = any(access in allowed_types for access in exam_types)
-        if not has_access:
+        exam_types = access_by_exam.get(exam.exam_id, [])
+        if not any(at in allowed_types for at in exam_types):
             continue
 
-        forecast_tasks = db.query(WritingTask).filter(
-            WritingTask.test_id == exam.exam_id,
-            WritingTask.is_forecast == True
-        ).order_by(WritingTask.part_number).all()
+        forecast_tasks = tasks_by_exam.get(exam.exam_id, [])
         if not forecast_tasks:
             continue
         result.append({
@@ -566,6 +628,7 @@ async def get_writing_forecasts(
                 "instructions": t.instructions,
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False))
+
             } for t in forecast_tasks]
         })
     return result
@@ -928,6 +991,7 @@ async def get_audio_file_lengths(
         return cached_result
     
     # Get all audio files for this exam through listening media
+    # Use .with_entities to avoid loading LONGBLOB audio_file column
     listening_media = db.query(ListeningMedia)\
         .join(ExamSection)\
         .filter(ExamSection.exam_id == exam_id)\
@@ -939,62 +1003,63 @@ async def get_audio_file_lengths(
             detail="No audio files found for this exam"
         )
     
-    import requests as http_requests
-
     part_lengths = []
     total_length = 0
+    needs_fallback = []  # media items without stored duration
     
     for i, media in enumerate(listening_media):
-        if media.audio_url:
-            # Download from R2 and compute real duration
-            try:
-                r2_response = http_requests.get(media.audio_url)
-                audio_data = io.BytesIO(r2_response.content)
-                audio = MP3(audio_data)
-                length = int(audio.info.length)
-                total_length += length
-                part_lengths.append({
-                    "part_number": i + 1,
-                    "length": length,
-                    "length_formatted": f"{length // 60}:{length % 60:02d}",
-                    "audio_url": media.audio_url
-                })
-                # Update DB duration if inaccurate
-                if media.duration != length:
-                    media.duration = length
-                    db.add(media)
-            except Exception as e:
-                part_lengths.append({
-                    "part_number": i + 1,
-                    "length": 0,
-                    "length_formatted": "00:00",
-                    "error": str(e)
-                })
-        elif media.audio_file:
-            # Legacy: read from LONGBLOB
-            audio_data = io.BytesIO(media.audio_file)
-            try:
-                audio = MP3(audio_data)
-                length = int(audio.info.length)
-                total_length += length
-                part_lengths.append({
-                    "part_number": i + 1,
-                    "length": length,
-                    "length_formatted": f"{length // 60}:{length % 60:02d}"
-                })
-            except Exception as e:
-                part_lengths.append({
-                    "part_number": i + 1,
-                    "length": 0,
-                    "length_formatted": "00:00",
-                    "error": str(e)
-                })
+        # Use stored duration from DB if available (no download needed!)
+        if media.duration and media.duration > 0:
+            length = int(media.duration)
+            total_length += length
+            part_data = {
+                "part_number": i + 1,
+                "length": length,
+                "length_formatted": f"{length // 60}:{length % 60:02d}",
+            }
+            if media.audio_url:
+                part_data["audio_url"] = media.audio_url
+            part_lengths.append(part_data)
+        else:
+            # Duration not stored — need fallback download (only for missing durations)
+            needs_fallback.append((i, media))
+            part_lengths.append({
+                "part_number": i + 1,
+                "length": 0,
+                "length_formatted": "00:00",
+            })
     
-    # Commit any duration updates
-    try:
-        db.commit()
-    except Exception:
-        pass
+    # Fallback: download and parse only for media without stored duration
+    if needs_fallback:
+        import requests as http_requests
+        for idx, media in needs_fallback:
+            try:
+                if media.audio_url:
+                    r2_response = http_requests.get(media.audio_url, timeout=15)
+                    audio_data = io.BytesIO(r2_response.content)
+                elif media.audio_file:
+                    audio_data = io.BytesIO(media.audio_file)
+                else:
+                    continue
+                
+                audio = MP3(audio_data)
+                length = int(audio.info.length)
+                total_length += length
+                part_lengths[idx]["length"] = length
+                part_lengths[idx]["length_formatted"] = f"{length // 60}:{length % 60:02d}"
+                if media.audio_url:
+                    part_lengths[idx]["audio_url"] = media.audio_url
+                
+                # Save duration to DB so we never need to download again
+                media.duration = length
+                db.add(media)
+            except Exception as e:
+                part_lengths[idx]["error"] = str(e)
+        
+        try:
+            db.commit()
+        except Exception:
+            pass
     
     # Prepare result
     result = {
@@ -1005,6 +1070,7 @@ async def get_audio_file_lengths(
         "parts_count": len(listening_media)
     }
     
+
     # Cache the result for 2 hours
     await cache.set(cache_key, result, ttl=7200)
     logger.info(f"Cached audio metadata for exam {exam_id}")
@@ -1468,35 +1534,67 @@ async def get_student_exam_history(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    # Return both full test and forecast results for the frontend to filter
-    exam_results = db.query(ExamResult).filter(
+    from sqlalchemy.sql import func
+    
+    # 1) Get all exam results with exam titles (ONE query via joinedload)
+    exam_results = db.query(ExamResult).options(
+        joinedload(ExamResult.exam)
+    ).filter(
         ExamResult.user_id == current_student.user_id
     ).order_by(ExamResult.completion_date.desc()).all()
     
+    if not exam_results:
+        return []
+    
+    # 2) Batch load first section type for all unique exam_ids (ONE query)
+    all_exam_ids = list(set(r.exam_id for r in exam_results))
+    section_type_rows = db.query(
+        ExamSection.exam_id,
+        func.min(ExamSection.section_type).label('section_type')
+    ).filter(
+        ExamSection.exam_id.in_(all_exam_ids)
+    ).group_by(ExamSection.exam_id).all()
+    exam_type_map = {eid: stype for eid, stype in section_type_rows}
+    
+    # 3) Batch load question counts for forecast sections (ONE query)
+    forecast_results = [(r.exam_id, r.forecast_part) for r in exam_results 
+                        if r.is_forecast and r.forecast_part]
+    question_count_map = {}  # (exam_id, order_number) -> count
+    if forecast_results:
+        # Get all relevant sections first
+        forecast_exam_ids = list(set(eid for eid, _ in forecast_results))
+        forecast_parts = list(set(part for _, part in forecast_results))
+        
+        section_rows = db.query(ExamSection.exam_id, ExamSection.order_number, ExamSection.section_id).filter(
+            ExamSection.exam_id.in_(forecast_exam_ids),
+            ExamSection.order_number.in_(forecast_parts)
+        ).all()
+        section_id_map = {(row.exam_id, row.order_number): row.section_id for row in section_rows}
+        
+        section_ids = [sid for sid in section_id_map.values()]
+        if section_ids:
+            q_count_rows = db.query(
+                Question.section_id,
+                func.count(Question.question_id).label('cnt')
+            ).filter(
+                Question.section_id.in_(section_ids),
+                Question.question_type != 'main_text'
+            ).group_by(Question.section_id).all()
+            sid_to_count = {sid: cnt for sid, cnt in q_count_rows}
+            
+            for (eid, order_num), sid in section_id_map.items():
+                question_count_map[(eid, order_num)] = sid_to_count.get(sid, 40)
+    
+    # Build response using pre-loaded data
     result_list = []
     for result in exam_results:
-        # Get the first section to determine exam type
-        first_section = db.query(ExamSection).filter(
-            ExamSection.exam_id == result.exam_id
-        ).first()
+        exam_type = exam_type_map.get(result.exam_id, "reading")
         
-        exam_type = first_section.section_type if first_section else "reading"  # Default to reading
-        
-        # Calculate total_questions for forecast results
         total_questions = 40  # Default for full tests
         if result.is_forecast and result.forecast_part:
-            # Get the specific section for this forecast part
-            forecast_section = db.query(ExamSection).filter(
-                ExamSection.exam_id == result.exam_id,
-                ExamSection.order_number == result.forecast_part
-            ).first()
-            if forecast_section:
-                from app.models import Question
-                question_count = db.query(Question).filter(
-                    Question.section_id == forecast_section.section_id,
-                    Question.question_type != 'main_text'
-                ).count()
-                total_questions = question_count if question_count > 0 else 40
+            total_questions = question_count_map.get(
+                (result.exam_id, result.forecast_part), 40
+            )
         
         result_list.append({
             "result_id": result.result_id,
@@ -1514,6 +1612,7 @@ async def get_student_exam_history(
         })
     
     return result_list
+
 
 @router.get("/my-exam-result/{result_id}", response_model=Dict)
 async def get_student_exam_detail(
@@ -1631,59 +1730,71 @@ async def get_writing_tasks(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
-    # Query exams that have writing sections and are active
-    query = db.query(Exam).join(ExamSection)\
-        .filter(
-            Exam.is_active == True,
-            ExamSection.section_type == 'essay'
-        )
+    # 1) Get all active exams with essay sections (ONE query)
+    exams = db.query(Exam).join(ExamSection).filter(
+        Exam.is_active == True,
+        ExamSection.section_type == 'essay'
+    ).distinct().all()
 
-    exams = query.distinct().all()
+    if not exams:
+        return []
 
-    exam_details = []
-    for exam in exams:
-        # Get exam access types
-        exam_access_types = db.query(ExamAccessType)\
-            .filter(ExamAccessType.exam_id == exam.exam_id)\
-            .all()
-        
-        # Determine allowed access types based on user role
-        allowed_types = []
-        if current_student.role == 'student':
-            allowed_types = ['student']
-        elif current_student.role == 'customer':
-            if current_student.is_vip:
-                allowed_types = ['no vip', 'vip']
-            else:
-                allowed_types = ['no vip']
-        
-        # Check if any of the exam's access types match the user's allowed types
-        exam_types = [access.access_type for access in exam_access_types]
-        has_access = any(access_type in allowed_types for access_type in exam_types)
-        
-        if not has_access:
-            continue
-            
-        # Get writing tasks for this exam
-        tasks = db.query(WritingTask).filter(
-            WritingTask.test_id == exam.exam_id
-        ).order_by(WritingTask.part_number).all()
-        
-        if not tasks:
-            continue
-            
-        # Check if any task has been completed
-        task_ids = [task.task_id for task in tasks]
-        answers = db.query(WritingAnswer).filter(
-            WritingAnswer.task_id.in_(task_ids),
+    exam_ids = [e.exam_id for e in exams]
+
+    # 2) Batch load access types (ONE query)
+    all_access = db.query(ExamAccessType).filter(
+        ExamAccessType.exam_id.in_(exam_ids)
+    ).all()
+    access_by_exam = {}
+    for a in all_access:
+        access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
+
+    # 3) Batch load all writing tasks (ONE query)
+    all_tasks = db.query(WritingTask).filter(
+        WritingTask.test_id.in_(exam_ids)
+    ).order_by(WritingTask.part_number).all()
+    tasks_by_exam = {}
+    for t in all_tasks:
+        tasks_by_exam.setdefault(t.test_id, []).append(t)
+
+    # 4) Batch load all user's writing answers (ONE query)
+    all_task_ids = [t.task_id for t in all_tasks]
+    user_answers_set = set()
+    if all_task_ids:
+        user_answer_rows = db.query(WritingAnswer.task_id).filter(
+            WritingAnswer.task_id.in_(all_task_ids),
             WritingAnswer.user_id == current_student.user_id
         ).all()
+        user_answers_set = set(row[0] for row in user_answer_rows)
+
+    # Determine allowed access types
+    allowed_types = []
+    if current_student.role == 'student':
+        allowed_types = ['student']
+    elif current_student.role == 'customer':
+        if current_student.is_vip:
+            allowed_types = ['no vip', 'vip']
+        else:
+            allowed_types = ['no vip']
+
+    # Build response using pre-loaded data
+    exam_details = []
+    for exam in exams:
+        exam_types = access_by_exam.get(exam.exam_id, [])
+        if not any(at in allowed_types for at in exam_types):
+            continue
+        
+        tasks = tasks_by_exam.get(exam.exam_id, [])
+        if not tasks:
+            continue
+        
+        answered_count = sum(1 for t in tasks if t.task_id in user_answers_set)
         
         exam_details.append({
             "test_id": exam.exam_id,
             "title": exam.title,
             "created_at": exam.created_at,
-            "is_completed": len(answers) == len(tasks),
+            "is_completed": answered_count == len(tasks),
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
@@ -1697,6 +1808,7 @@ async def get_writing_tasks(
         })
 
     return exam_details
+
 
 @router.get("/writing/tasks/{task_id}", response_model=dict)
 async def get_writing_task_detail(
@@ -1909,377 +2021,4 @@ async def submit_writing_answer(
             "submitted": bool(other_part[1]) if other_part else False
         } if other_part else None
     }
-@router.get("/writing/test/{test_id}/answers", response_model=dict)
-async def get_writing_test_answers(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks and answers for this test
-    answers = db.query(WritingTask, WritingAnswer)\
-        .outerjoin(WritingAnswer, and_(
-            WritingAnswer.task_id == WritingTask.task_id,
-            WritingAnswer.user_id == current_student.user_id
-        ))\
-        .filter(WritingTask.test_id == test_id)\
-        .order_by(WritingTask.part_number)\
-        .all()
-    
-    if not answers:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-    
-    # Check if all parts are submitted
-    total_tasks = len(answers)
-    submitted_answers = sum(1 for _, answer in answers if answer is not None)
-    is_completed = total_tasks == submitted_answers
-    
-    return {
-        "test_id": test_id,
-        "is_completed": is_completed,  # This is calculated on-the-fly
-        "total_parts": total_tasks,
-        "submitted_parts": submitted_answers,
-        "parts": [...]
-    }
-@router.get("/writing/test/{test_id}/parts", response_model=List[dict])
-async def get_writing_test_parts(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks for this test
-    tasks = db.query(WritingTask).filter(
-        WritingTask.test_id == test_id
-    ).order_by(WritingTask.part_number).all()
-    
-    if not tasks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-    
-    return [{
-        "task_id": task.task_id,
-        "part_number": task.part_number,
-        "task_type": task.task_type,
-        "duration": task.duration,
-        "word_limit": task.word_limit
-    } for task in tasks]
-@router.delete("/writing/test/{test_id}/reset", response_model=dict)
-async def reset_writing_test(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks for this test
-    tasks = db.query(WritingTask).filter(
-        WritingTask.test_id == test_id
-    ).all()
-    
-    if not tasks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
 
-    # Get all answers for this test's tasks from the current student
-    task_ids = [task.task_id for task in tasks]
-    deleted_count = db.query(WritingAnswer).filter(
-        WritingAnswer.task_id.in_(task_ids),
-        WritingAnswer.user_id == current_student.user_id
-    ).delete(synchronize_session=False)
-
-    db.commit()
-
-    return {
-        "message": "Writing test answers reset successfully",
-        "test_id": test_id,
-        "answers_deleted": deleted_count
-    }
-# Add this new endpoint
-@router.get("/writing/part/{task_id}/essay", response_model=dict)
-async def get_writing_part_essay(
-    task_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get the task and its associated test
-    task = db.query(WritingTask).filter(
-        WritingTask.task_id == task_id
-    ).first()
-    
-    if not task:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Writing task not found"
-        )
-
-    # Get the student's answer for this task
-    answer = db.query(WritingAnswer).filter(
-        WritingAnswer.task_id == task_id,
-        WritingAnswer.user_id == current_student.user_id
-    ).first()
-
-    # Get the test title
-    test = db.query(Exam).filter(
-        Exam.exam_id == task.test_id
-    ).first()
-
-    return {
-        "test_id": task.test_id,
-        "test_title": test.title if test else None,
-        "task_id": task.task_id,
-        "part_number": task.part_number,
-        "task_type": task.task_type,
-        "instructions": task.instructions,
-        "word_limit": task.word_limit,
-        "essay": {
-            "answer_text": answer.answer_text if answer else None,
-            "score": answer.score if answer else None,
-            "created_at": answer.created_at if answer else None,
-            "updated_at": answer.updated_at if answer else None
-        } if answer else None
-    }
-
-# Add this new endpoint for editing
-@router.put("/writing/part/{task_id}/essay", response_model=dict)
-async def update_writing_part_essay(
-    task_id: int,
-    answer_data: WritingAnswerSubmit,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    task = db.query(WritingTask).filter(
-        WritingTask.task_id == task_id
-    ).first()
-    
-    if not task:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Writing task not found"
-        )
-
-    # Get or create answer
-    writing_answer = db.query(WritingAnswer).filter(
-        WritingAnswer.task_id == task_id,
-        WritingAnswer.user_id == current_student.user_id
-    ).first()
-
-    if writing_answer:
-        writing_answer.answer_text = answer_data.answer_text
-        writing_answer.updated_at = get_vietnam_time().replace(tzinfo=None)
-    else:
-        writing_answer = WritingAnswer(
-            task_id=task_id,
-            user_id=current_student.user_id,
-            answer_text=answer_data.answer_text,
-            score=0,
-            created_at=get_vietnam_time().replace(tzinfo=None),
-            updated_at=get_vietnam_time().replace(tzinfo=None)
-        )
-        db.add(writing_answer)
-
-    db.commit()
-
-    return {
-        "message": "Essay updated successfully",
-        "task_id": task_id,
-        "part_number": task.part_number,
-        "word_count": len(answer_data.answer_text.split()),
-        "answer_text": writing_answer.answer_text,
-        "updated_at": writing_answer.updated_at
-    }
-@router.get("/writing/test/{test_id}/answers", response_model=dict)
-async def get_writing_test_answers(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks and answers for this test
-    answers = db.query(WritingTask, WritingAnswer)\
-        .outerjoin(WritingAnswer, and_(
-            WritingAnswer.task_id == WritingTask.task_id,
-            WritingAnswer.user_id == current_student.user_id
-        ))\
-        .filter(WritingTask.test_id == test_id)\
-        .order_by(WritingTask.part_number)\
-        .all()
-    
-    if not answers:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-    
-    return {
-        "test_id": test_id,
-        "parts": [{
-            "task_id": task.task_id,
-            "part_number": task.part_number,
-            "task_type": task.task_type,
-            "instructions": task.instructions,
-            "word_limit": task.word_limit,
-            "answer": {
-                "answer_text": answer.answer_text if answer else None,
-                "score": answer.score if answer else None,
-                "created_at": answer.created_at if answer else None,
-                "updated_at": answer.updated_at if answer else None
-            }
-        } for task, answer in answers]
-    }
-@router.post("/writing/tasks/{task_id}/submit", response_model=dict)
-async def submit_writing_answer(
-    task_id: int,
-    answer_data: WritingAnswerSubmit,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    task = db.query(WritingTask).filter(
-        WritingTask.task_id == task_id
-    ).first()
-    
-    if not task:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Writing task not found"
-        )
-
-    # Save current answer
-    writing_answer = db.query(WritingAnswer).filter(
-        WritingAnswer.task_id == task_id,
-        WritingAnswer.user_id == current_student.user_id
-    ).first()
-
-    if writing_answer:
-        writing_answer.answer_text = answer_data.answer_text
-        writing_answer.updated_at = get_vietnam_time().replace(tzinfo=None)
-    else:
-        writing_answer = WritingAnswer(
-            task_id=task_id,
-            user_id=current_student.user_id,
-            answer_text=answer_data.answer_text,
-            score=0,
-            created_at=get_vietnam_time().replace(tzinfo=None),
-            updated_at=get_vietnam_time().replace(tzinfo=None)
-        )
-        db.add(writing_answer)
-        db.flush()
-
-    # Get other part's status
-    other_part = db.query(WritingTask, WritingAnswer).outerjoin(
-        WritingAnswer,
-        and_(
-            WritingAnswer.task_id == WritingTask.task_id,
-            WritingAnswer.user_id == current_student.user_id
-        )
-    ).filter(
-        WritingTask.test_id == task.test_id,
-        WritingTask.task_id != task_id
-    ).first()
-
-    db.commit()
-
-    return {
-        "message": "Writing answer submitted successfully",
-        "task_id": task_id,
-        "part_number": task.part_number,
-        "word_count": len(answer_data.answer_text.split()),
-        "answer_text": writing_answer.answer_text,
-        "other_part": {
-            "task_id": other_part[0].task_id if other_part else None,
-            "part_number": other_part[0].part_number if other_part else None,
-            "submitted": bool(other_part[1]) if other_part else False
-        } if other_part else None
-    }
-@router.get("/writing/test/{test_id}/answers", response_model=dict)
-async def get_writing_test_answers(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks and answers for this test
-    answers = db.query(WritingTask, WritingAnswer)\
-        .outerjoin(WritingAnswer, and_(
-            WritingAnswer.task_id == WritingTask.task_id,
-            WritingAnswer.user_id == current_student.user_id
-        ))\
-        .filter(WritingTask.test_id == test_id)\
-        .order_by(WritingTask.part_number)\
-        .all()
-    
-    if not answers:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-    
-    # Check if all parts are submitted
-    total_tasks = len(answers)
-    submitted_answers = sum(1 for _, answer in answers if answer is not None)
-    is_completed = total_tasks == submitted_answers
-    
-    return {
-        "test_id": test_id,
-        "is_completed": is_completed,  # This is calculated on-the-fly
-        "total_parts": total_tasks,
-        "submitted_parts": submitted_answers,
-        "parts": [...]
-    }
-@router.get("/writing/test/{test_id}/parts", response_model=List[dict])
-async def get_writing_test_parts(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks for this test
-    tasks = db.query(WritingTask).filter(
-        WritingTask.test_id == test_id
-    ).order_by(WritingTask.part_number).all()
-    
-    if not tasks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-    
-    return [{
-        "task_id": task.task_id,
-        "part_number": task.part_number,
-        "task_type": task.task_type,
-        "duration": task.duration,
-        "word_limit": task.word_limit
-    } for task in tasks]
-@router.delete("/writing/test/{test_id}/reset", response_model=dict)
-async def reset_writing_test(
-    test_id: int,
-    current_student = Depends(get_current_student),
-    db: Session = Depends(get_db)
-):
-    # Get all tasks for this test
-    tasks = db.query(WritingTask).filter(
-        WritingTask.test_id == test_id
-    ).all()
-    
-    if not tasks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No writing tasks found for this test"
-        )
-
-    # Get all answers for this test's tasks from the current student
-    task_ids = [task.task_id for task in tasks]
-    deleted_count = db.query(WritingAnswer).filter(
-        WritingAnswer.task_id.in_(task_ids),
-        WritingAnswer.user_id == current_student.user_id
-    ).delete(synchronize_session=False)
-
-    db.commit()
-
-    return {
-        "message": "Writing test answers reset successfully",
-        "test_id": test_id,
-        "answers_deleted": deleted_count
-    }
- 

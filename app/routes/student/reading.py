@@ -24,75 +24,98 @@ async def get_available_reading_tests(
     db: Session = Depends(get_db)
 ):
     """Get all available reading tests for students"""
-    # Query active exams with reading sections
-    query = db.query(Exam).join(ExamSection)\
-        .filter(
-            Exam.is_active == True,
-            ExamSection.section_type == 'reading'
+    from sqlalchemy import and_
+    
+    # 1) Get all active exams with reading sections (ONE query)
+    exams = db.query(Exam).join(ExamSection).filter(
+        Exam.is_active == True,
+        ExamSection.section_type == 'reading'
+    ).distinct().all()
+
+    if not exams:
+        return []
+
+    exam_ids = [e.exam_id for e in exams]
+
+    # 2) Batch load all access types (ONE query)
+    all_access = db.query(ExamAccessType).filter(
+        ExamAccessType.exam_id.in_(exam_ids)
+    ).all()
+    access_by_exam = {}
+    for a in all_access:
+        access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
+
+    # 3) Batch load all reading sections (ONE query)
+    all_sections = db.query(ExamSection).filter(
+        ExamSection.exam_id.in_(exam_ids),
+        ExamSection.section_type == 'reading'
+    ).order_by(ExamSection.order_number).all()
+    sections_by_exam = {}
+    for s in all_sections:
+        sections_by_exam.setdefault(s.exam_id, []).append(s)
+
+    # 4) Batch load latest results per exam (ONE query)
+    latest_results_sub = db.query(
+        ExamResult.exam_id,
+        func.max(ExamResult.completion_date).label('max_date')
+    ).filter(
+        ExamResult.exam_id.in_(exam_ids),
+        ExamResult.user_id == current_student.user_id
+    ).group_by(ExamResult.exam_id).subquery()
+
+    latest_results = db.query(ExamResult).join(
+        latest_results_sub,
+        and_(
+            ExamResult.exam_id == latest_results_sub.c.exam_id,
+            ExamResult.completion_date == latest_results_sub.c.max_date
         )
+    ).filter(
+        ExamResult.user_id == current_student.user_id
+    ).all()
+    results_by_exam = {r.exam_id: r for r in latest_results}
 
-    exams = query.distinct().all()
+    # Determine allowed access types
+    allowed_types = []
+    if current_student.role == 'student':
+        allowed_types = ['student']
+    elif current_student.role == 'customer':
+        if current_student.is_vip:
+            allowed_types = ['no vip', 'vip']
+        else:
+            allowed_types = ['no vip']
 
+    # Build response using pre-loaded data
     exam_details = []
     for exam in exams:
-        # Get exam access types
-        exam_access_types = db.query(ExamAccessType)\
-            .filter(ExamAccessType.exam_id == exam.exam_id)\
-            .all()
-        
-        # Determine allowed access types based on user role
-        allowed_types = []
-        if current_student.role == 'student':
-            allowed_types = ['student']
-        elif current_student.role == 'customer':
-            if current_student.is_vip:
-                allowed_types = ['no vip', 'vip']
-            else:
-                allowed_types = ['no vip']
-        
-        # Check if any of the exam's access types match the user's allowed types
-        exam_types = [access.access_type for access in exam_access_types]
-        has_access = any(access_type in allowed_types for access_type in exam_types)
-        
-        if not has_access:
+        exam_types = access_by_exam.get(exam.exam_id, [])
+        if not any(at in allowed_types for at in exam_types):
             continue
-            
-        # Get reading section details
-        reading_section = db.query(ExamSection).filter(
-            ExamSection.exam_id == exam.exam_id,
-            ExamSection.section_type == 'reading'
-        ).first()
         
-        # Get all reading sections for part titles
-        all_reading_sections = db.query(ExamSection).filter(
-            ExamSection.exam_id == exam.exam_id,
-            ExamSection.section_type == 'reading'
-        ).order_by(ExamSection.order_number).all()
+        sections = sections_by_exam.get(exam.exam_id, [])
+        if not sections:
+            continue
         
-        # Get the latest exam result for the current student
-        exam_result = db.query(ExamResult).filter(
-            ExamResult.exam_id == exam.exam_id,
-            ExamResult.user_id == current_student.user_id
-        ).order_by(ExamResult.completion_date.desc()).first()
+        first_section = sections[0]
+        part_titles = {}
+        for s in sections:
+            if s.part_title:
+                part_titles[s.order_number] = s.part_title
         
-        if reading_section:
-            part_titles = {}
-            for s in all_reading_sections:
-                if s.part_title:
-                    part_titles[s.order_number] = s.part_title
-            
-            exam_details.append({
-                "exam_id": exam.exam_id,
-                "title": exam.title,
-                "created_at": exam.created_at,
-                "duration": reading_section.duration,
-                "total_marks": reading_section.total_marks,
-                "is_completed": exam_result is not None,
-                "total_score": exam_result.total_score if exam_result else 0,
-                "part_titles": part_titles
-            })
+        latest = results_by_exam.get(exam.exam_id)
+        
+        exam_details.append({
+            "exam_id": exam.exam_id,
+            "title": exam.title,
+            "created_at": exam.created_at,
+            "duration": first_section.duration,
+            "total_marks": first_section.total_marks,
+            "is_completed": latest is not None,
+            "total_score": latest.total_score if latest else 0,
+            "part_titles": part_titles
+        })
 
     return exam_details
+
 
 @router.get("/reading-test/{exam_id}/description", response_model=dict)
 async def get_reading_test_description(

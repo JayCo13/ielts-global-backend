@@ -8,15 +8,19 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from app.utils.datetime_utils import get_vietnam_time
 import groq
+import asyncio
 import os
-import json  # Add this import
+import json
+import logging
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Create two separate clients with different API keys
-client_evaluation = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
-client_rewriting = groq.Groq(api_key=os.getenv("GROQ_REWRITING_API_KEY"))
+# Create two separate ASYNC clients with different API keys for non-blocking calls
+client_evaluation = groq.AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+client_rewriting = groq.AsyncGroq(api_key=os.getenv("GROQ_REWRITING_API_KEY"))
 
 class EssayEvaluationRequest(BaseModel):
     part_number: int
@@ -224,9 +228,9 @@ Return your evaluation in the exact JSON format below. All explanations and sugg
 Do not include any explanatory text before or after the JSON. Ensure all strings are properly escaped and the rewritten essay includes \\n\\n between paragraphs.'''
 
     try:
-        # First model for evaluation (llama3-70b-8192)
-        evaluation_completion = client_evaluation.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Using llama3 for evaluation
+        # Run BOTH API calls in PARALLEL using asyncio.gather (halves wait time)
+        evaluation_task = client_evaluation.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. You must identify ALL mistakes in student essays and provide accurate band scores according to official IELTS criteria. Always respond in the exact JSON format specified."},
                 {"role": "user", "content": evaluation_prompt}
@@ -235,15 +239,20 @@ Do not include any explanatory text before or after the JSON. Ensure all strings
             max_tokens=5000
         )
         
-        # Second model for essay rewriting (claude-3-opus-20240229)
-        rewriting_completion = client_rewriting.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Using Claude for rewriting
+        rewriting_task = client_rewriting.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. Your task is to rewrite student essays to demonstrate Band 8.0+ standard. Always respond in the exact JSON format specified."},
                 {"role": "user", "content": rewriting_prompt}
             ],
-            temperature=1,  # Slightly higher temperature for more creative rewriting
+            temperature=1,
             max_tokens=6000
+        )
+        
+        # Wait for both with 60s timeout to prevent infinite hangs
+        evaluation_completion, rewriting_completion = await asyncio.wait_for(
+            asyncio.gather(evaluation_task, rewriting_task),
+            timeout=60
         )
         
         # Parse both responses
@@ -254,6 +263,11 @@ Do not include any explanatory text before or after the JSON. Ensure all strings
         evaluation_result["rewritten_essay"] = rewriting_result["rewritten_essay"]
         
         return evaluation_result
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="AI evaluation timed out after 60 seconds"
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -361,6 +375,7 @@ async def evaluate_essay(
         "evaluation_result": evaluation
     }
 
+
 @router.post("/evaluate-and-save/{task_id}", response_model=Dict)
 async def evaluate_and_save_essay(
     task_id: int,
@@ -412,6 +427,7 @@ async def evaluate_and_save_essay(
             "is_ai_evaluated": True
         }
 
+    # Evaluate with Groq (now uses AsyncGroq + parallel evaluation+rewriting)
     evaluation = await evaluate_with_groq(
         essay_text=clean_essay,
         instructions=clean_instructions,
@@ -448,6 +464,7 @@ async def evaluate_and_save_essay(
             mistakes=evaluation["mistakes"],
             improvement_suggestions=evaluation["improvement_suggestions"],
             rewritten_essay=evaluation["rewritten_essay"],
+            is_ai_evaluated=True,
             created_at=get_vietnam_time().replace(tzinfo=None),
             updated_at=get_vietnam_time().replace(tzinfo=None)
         )
@@ -464,6 +481,7 @@ async def evaluate_and_save_essay(
         "saved": True,
         "answer_id": writing_answer.answer_id
     }
+
 
 @router.get("/evaluation/{answer_id}", response_model=Dict)
 async def get_evaluation_data(

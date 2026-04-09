@@ -107,9 +107,10 @@ async def get_update_key(
 
 @router.get("/feedbacks", response_model=List[FeedbackResponse])
 async def get_feedbacks(
-    current_admin = Depends(get_current_user),
+    limit: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    feedbacks = db.query(Feedback).order_by(Feedback.created_at.desc()).all()
-    
-    return feedbacks
+    query = db.query(Feedback).order_by(Feedback.created_at.desc())
+    if limit:
+        query = query.limit(limit)
+    return query.all()

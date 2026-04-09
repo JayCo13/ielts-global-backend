@@ -1772,13 +1772,13 @@ async def get_admin_notifications(
     
 
 
-    # Get recent completed PayOS transactions only (success notifications)
+    # Get recent completed PayPal transactions only (success notifications)
     recent_transactions = db.query(PackageTransaction, User, VIPPackage)\
         .join(User, User.user_id == PackageTransaction.user_id)\
         .join(VIPPackage, VIPPackage.package_id == PackageTransaction.package_id)\
         .filter(
             PackageTransaction.created_at >= get_vietnam_time().replace(tzinfo=None) - timedelta(days=days),
-            PackageTransaction.payment_method == "payos",
+            PackageTransaction.payment_method == "paypal",
             PackageTransaction.status == "completed"
         )\
         .order_by(PackageTransaction.created_at.desc())\
@@ -1790,15 +1790,15 @@ async def get_admin_notifications(
     # Add transaction notifications
     for transaction, user, package in recent_transactions:
         # Set title/message based on status
-        if transaction.status == "completed" and transaction.payment_method == "payos":
-            title = "Thanh toán PayOS thành công"
-            message = f"{user.username} đã thanh toán {package.name} ({int(transaction.amount):,}₫)"
-        elif transaction.status == "reject" and transaction.payment_method == "payos":
-            title = "Thanh toán PayOS thất bại"
-            message = f"{user.username} hủy thanh toán {package.name} ({int(transaction.amount):,}₫)"
+        if transaction.status == "completed" and transaction.payment_method == "paypal":
+            title = "PayPal Payment Successful"
+            message = f"{user.username} purchased {package.name} (${float(transaction.amount):.2f})"
+        elif transaction.status == "reject" and transaction.payment_method == "paypal":
+            title = "PayPal Payment Failed"
+            message = f"{user.username} cancelled {package.name} (${float(transaction.amount):.2f})"
         else:
-            title = "Yêu cầu mua gói VIP"
-            message = f"{user.username} đăng ký {package.name} ({int(transaction.amount):,}₫)"
+            title = "VIP Purchase Request"
+            message = f"{user.username} requested {package.name} (${float(transaction.amount):.2f})"
         
         notifications.append({
             "id": f"transaction_{transaction.transaction_id}",
@@ -2166,7 +2166,7 @@ async def get_all_students(
     current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Get all students with pagination and search"""
+    """Get all students with search and hard limit"""
     
     query = db.query(User).filter(User.role == 'student')
     
@@ -2179,8 +2179,7 @@ async def get_all_students(
             )
         )
     
-    total = query.count()
-    students = query.order_by(User.user_id).all()
+    students = query.order_by(User.user_id).limit(500).all()
     
     return [{
         "user_id": student.user_id,
@@ -2285,41 +2284,58 @@ async def get_all_exams(
     current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Get all exams with pagination, search and filtering"""
+    """Get all exams — optimized: 3 queries instead of 200+ (N+1 fix)"""
     
-    query = db.query(Exam)
+    # Subquery: count attempts per exam in ONE query
+    attempt_sub = db.query(
+        ExamResult.exam_id,
+        func.count(ExamResult.result_id).label('attempt_count')
+    ).group_by(ExamResult.exam_id).subquery()
+    
+    # Main query with attempt counts joined
+    query = db.query(
+        Exam,
+        func.coalesce(attempt_sub.c.attempt_count, 0).label('attempts')
+    ).outerjoin(
+        attempt_sub, attempt_sub.c.exam_id == Exam.exam_id
+    )
     
     if search:
-        search_term = f"%{search}%"
-        query = query.filter(Exam.title.ilike(search_term))
+        query = query.filter(Exam.title.ilike(f"%{search}%"))
     
     if exam_type:
         query = query.join(ExamSection).filter(ExamSection.section_type == exam_type)
     
-    total = query.count()
-    exams = query.order_by(Exam.created_at.desc()).offset(skip).limit(limit).all()
+    exams_with_attempts = query.order_by(Exam.created_at.desc()).offset(skip).limit(limit).all()
     
-    result = []
-    for exam in exams:
-        # Get exam type from sections
-        sections = db.query(ExamSection).filter(ExamSection.exam_id == exam.exam_id).all()
-        section_types = [section.section_type for section in sections]
-        
-        # Count attempts
-        attempts = db.query(func.count(ExamResult.result_id))\
-            .filter(ExamResult.exam_id == exam.exam_id)\
-            .scalar()
-        
-        result.append({
-            "exam_id": exam.exam_id,
-            "title": exam.title,
-            "created_at": exam.created_at,
-            "is_active": exam.is_active,
-            "section_types": section_types,
-            "attempts": attempts or 0
-        })
+    # Batch load ALL section types in ONE query instead of N separate queries
+    exam_ids = [exam.exam_id for exam, _ in exams_with_attempts]
     
-    return result
+    if exam_ids:
+        sections = db.query(
+            ExamSection.exam_id, ExamSection.section_type
+        ).filter(
+            ExamSection.exam_id.in_(exam_ids)
+        ).all()
+    else:
+        sections = []
+    
+    # Build lookup map: exam_id -> [section_types]
+    section_map = {}
+    for exam_id, section_type in sections:
+        if exam_id not in section_map:
+            section_map[exam_id] = []
+        if section_type not in section_map[exam_id]:
+            section_map[exam_id].append(section_type)
+    
+    return [{
+        "exam_id": exam.exam_id,
+        "title": exam.title,
+        "created_at": exam.created_at,
+        "is_active": exam.is_active,
+        "section_types": section_map.get(exam.exam_id, []),
+        "attempts": attempts or 0
+    } for exam, attempts in exams_with_attempts]
 
 @router.get("/dashboard/system-logs", response_model=List[dict])
 async def get_system_logs(
