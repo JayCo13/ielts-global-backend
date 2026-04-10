@@ -13,18 +13,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:root@localhost/ie
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=20,          # Adjusted for Koyeb (smaller instance)
-    max_overflow=30,       # Adjusted overflow
+    pool_size=5,           # Small pool = faster startup on Koyeb
+    max_overflow=10,       # Allow bursts but don't over-allocate
     pool_timeout=30,       # Keep fast failure detection
-    pool_recycle=1800,     # Set to 30 minutes for connection recycling
-    pool_pre_ping=True,    # Keep pre-ping enabled for connection validation
+    pool_recycle=900,      # Recycle every 15 min (TiDB drops idle connections)
+    pool_pre_ping=True,    # Validate connections before use
     echo=False,            # Keep echo disabled in production
     connect_args={
-        'connect_timeout': 20,  # Reduced connection timeout
-        'read_timeout': 60,     # Read timeout in seconds
-        'write_timeout': 60,    # Write timeout in seconds
-        'charset': 'utf8mb4',   # Ensure proper charset
-        'autocommit': False     # Explicit autocommit setting
+        'connect_timeout': 10,   # Faster failure on unreachable DB
+        'read_timeout': 60,      # Read timeout in seconds
+        'write_timeout': 60,     # Write timeout in seconds
+        'charset': 'utf8mb4',    # Ensure proper charset
+        'autocommit': False      # Explicit autocommit setting
     }
 )
 
