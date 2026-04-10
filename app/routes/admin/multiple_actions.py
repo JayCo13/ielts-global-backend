@@ -375,7 +375,8 @@ async def upload_feedback_image(
     image: UploadFile = File(...),
     current_admin = Depends(get_current_admin)
 ):
-    """Upload an image for feedback and return the URL"""
+    """Upload an image for feedback and return as base64 data URL"""
+    import base64
     
     # Validate file type (only allow images)
     content_type = image.content_type
@@ -385,25 +386,14 @@ async def upload_feedback_image(
             detail="Only image files are allowed"
         )
     
-    # Create directory if it doesn't exist
-    os.makedirs(FEEDBACK_IMAGES_DIR, exist_ok=True)
-    
-    # Generate a unique filename
-    file_extension = os.path.splitext(image.filename)[1]
-    unique_filename = f"{uuid4()}{file_extension}"
-    file_path = os.path.join(FEEDBACK_IMAGES_DIR, unique_filename)
-    
-    # Save the file
-    with open(file_path, "wb") as buffer:
-        content = await image.read()
-        buffer.write(content)
-    
-    # Return the URL path that can be used to access the image
-    image_url = f"/static/feedback_images/{unique_filename}"
+    # Read image content and convert to base64 data URL
+    image_content = await image.read()
+    base64_encoded = base64.b64encode(image_content).decode('utf-8')
+    data_url = f"data:{content_type};base64,{base64_encoded}"
     
     return {
         "message": "Image uploaded successfully",
-        "image_url": image_url
+        "image_url": data_url
     }
 
 # GET endpoints for Feedback

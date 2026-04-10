@@ -125,7 +125,7 @@ class Feedback(Base):
     
     feedback_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.user_id'), nullable=True)  # Add this line
-    image_url = Column(String(255), nullable=True)
+    image_url = Column(Text, nullable=True)
     content = Column(Text)
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
     user = relationship("User")
