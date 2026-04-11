@@ -354,6 +354,209 @@ async def capture_payment(
             detail="Payment capture failed. Please contact support."
         )
 
+
+@router.post("/packages/{package_id}/verify-and-activate", response_model=dict)
+async def verify_and_activate(
+    package_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Verify a client-side PayPal payment and activate VIP.
+    Called AFTER PayPal JS SDK creates + captures an order on the client side.
+    Backend verifies the order via PayPal API before activating VIP.
+    """
+    from app.utils.paypal_service import get_access_token, _get_base_url
+    import httpx
+    
+    body = await request.json()
+    paypal_order_id = body.get("paypal_order_id")
+    
+    if not paypal_order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing paypal_order_id"
+        )
+    
+    # Get the package
+    package = db.query(VIPPackage).filter(
+        VIPPackage.package_id == package_id,
+        VIPPackage.is_active == True
+    ).first()
+    
+    if not package:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not available"
+        )
+    
+    # Prevent duplicate activation
+    existing = db.query(PackageTransaction).filter(
+        PackageTransaction.paypal_order_id == paypal_order_id,
+        PackageTransaction.status == "completed"
+    ).first()
+    
+    if existing:
+        return {
+            "message": "Payment already processed",
+            "transaction_id": existing.transaction_id,
+            "status": "completed"
+        }
+    
+    # Rate limiting: max 20 payment requests per user per 5 minutes
+    five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
+    recent_count = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.created_at >= five_min_ago,
+        PackageTransaction.status != "reject"
+    ).count()
+    
+    if recent_count >= 20:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many payment requests. Please try again later."
+        )
+    
+    # Verify the order with PayPal API
+    try:
+        token = get_access_token()
+        base_url = _get_base_url()
+        
+        with httpx.Client() as client:
+            response = client.get(
+                f"{base_url}/v2/checkout/orders/{paypal_order_id}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            order_details = response.json()
+        
+        order_status = order_details.get("status")
+        
+        # Verify payment is completed
+        if order_status != "COMPLETED":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Payment not completed. Status: {order_status}"
+            )
+        
+        # Verify the amount matches
+        purchase_units = order_details.get("purchase_units", [])
+        if not purchase_units:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid payment: no purchase units"
+            )
+        
+        paid_amount = float(purchase_units[0].get("amount", {}).get("value", "0"))
+        expected_amount = float(package.price)
+        
+        if abs(paid_amount - expected_amount) > 0.01:
+            logger.warning(
+                f"Amount mismatch for order {paypal_order_id}: "
+                f"paid={paid_amount}, expected={expected_amount}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Payment amount does not match package price"
+            )
+        
+        # Extract capture ID
+        capture_id = None
+        captures = purchase_units[0].get("payments", {}).get("captures", [])
+        if captures:
+            capture_id = captures[0].get("id")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"PayPal order verification failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify payment. Please contact support."
+        )
+    
+    # Payment verified — create records and activate VIP
+    try:
+        # Subscription stacking logic
+        if package.package_type == "single_skill":
+            active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+                VIPSubscription.user_id == current_user.user_id,
+                VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+                VIPSubscription.payment_status == "completed",
+                ((VIPPackage.package_type == "single_skill") & (VIPPackage.skill_type == package.skill_type)) |
+                (VIPPackage.package_type == "all_skills")
+            ).order_by(VIPSubscription.end_date.desc()).first()
+        else:
+            active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+                VIPSubscription.user_id == current_user.user_id,
+                VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+                VIPSubscription.payment_status == "completed",
+                VIPPackage.package_type == "all_skills"
+            ).order_by(VIPSubscription.end_date.desc()).first()
+        
+        if active_subscription:
+            start_date = active_subscription.end_date
+        else:
+            start_date = get_vietnam_time().replace(tzinfo=None)
+        
+        end_date = start_date + timedelta(days=package.duration_months * 30)
+        
+        # Create subscription (completed immediately)
+        subscription = VIPSubscription(
+            user_id=current_user.user_id,
+            package_id=package_id,
+            start_date=start_date,
+            end_date=end_date,
+            payment_status="completed",
+            created_at=get_vietnam_time().replace(tzinfo=None)
+        )
+        db.add(subscription)
+        db.commit()
+        db.refresh(subscription)
+        
+        # Create transaction record (completed immediately)
+        transaction = PackageTransaction(
+            user_id=current_user.user_id,
+            package_id=package_id,
+            subscription_id=subscription.subscription_id,
+            amount=package.price,
+            payment_method="paypal",
+            paypal_order_id=paypal_order_id,
+            status="completed",
+            admin_note=f"PayPal capture: {capture_id or 'N/A'}",
+            created_at=get_vietnam_time().replace(tzinfo=None)
+        )
+        db.add(transaction)
+        
+        # Activate VIP
+        current_user.is_vip = True
+        if current_user.vip_expiry is None or end_date > current_user.vip_expiry:
+            current_user.vip_expiry = end_date
+        
+        db.commit()
+        
+        logger.info(
+            f"VIP activated for user {current_user.user_id}: "
+            f"package={package.name}, order={paypal_order_id}, capture={capture_id}"
+        )
+        
+        return {
+            "message": "Payment verified and VIP activated!",
+            "transaction_id": transaction.transaction_id,
+            "status": "completed"
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"VIP activation failed after payment: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment was successful but VIP activation failed. Please contact support with your PayPal order ID."
+        )
+
 @router.get("/subscription/history", response_model=List[dict])
 async def get_subscription_history(
     current_user: User = Depends(get_current_student),
