@@ -14,6 +14,7 @@ from .admin.multiple_actions import router as multiple_actions_router
 from .student.multiple_actions import router as student_multiple_actions_router
 from .student.vocabulary_routes import router as vocabulary_router
 from .student.dictation_routes import router as student_dictation_router
+from .public_seo import router as public_seo_router
 
 router = APIRouter()
 
@@ -33,3 +34,4 @@ router.include_router(ai_router, prefix="/ai", tags=["ai"])
 router.include_router(auth_router, tags=["auth"])
 router.include_router(vocabulary_router, prefix="/student", tags=["vocabulary"])
 router.include_router(student_dictation_router, prefix="/student", tags=["student-dictation"])
+router.include_router(public_seo_router, prefix="/public", tags=["public-seo"])
