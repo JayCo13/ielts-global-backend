@@ -58,7 +58,7 @@ def get_access_token() -> str:
     client_id, client_secret = _get_credentials()
     base_url = _get_base_url()
     
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{base_url}/v1/oauth2/token",
             auth=(client_id, client_secret),
@@ -122,7 +122,7 @@ def create_order(
         }
     }
     
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{base_url}/v2/checkout/orders",
             json=order_data,
@@ -166,7 +166,7 @@ def capture_order(order_id: str) -> dict:
     token = get_access_token()
     base_url = _get_base_url()
     
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{base_url}/v2/checkout/orders/{order_id}/capture",
             headers={
@@ -228,7 +228,7 @@ def verify_webhook_signature(
         "webhook_event": __import__("json").loads(body),
     }
     
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30.0) as client:
         response = client.post(
             f"{base_url}/v1/notifications/verify-webhook-signature",
             json=verify_data,
