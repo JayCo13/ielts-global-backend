@@ -557,6 +557,255 @@ async def verify_and_activate(
             detail="Payment was successful but VIP activation failed. Please contact support with your PayPal order ID."
         )
 
+
+@router.post("/packages/{package_id}/server-capture", response_model=dict)
+async def server_capture_and_activate(
+    package_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    BULLETPROOF payment endpoint: Capture + Activate in ONE atomic step.
+    
+    Flow:
+    1. Client creates order on PayPal (client-side) — no money moves
+    2. User approves on PayPal popup — still no money moves
+    3. Client sends order_id here — backend captures via PayPal API
+    4. If capture succeeds → activate VIP immediately (same DB transaction)
+    5. If capture fails → no money deducted, no VIP activated
+    
+    This guarantees: money is NEVER taken without VIP being activated.
+    """
+    from app.utils.paypal_service import capture_order, get_access_token, _get_base_url
+    import httpx
+    
+    body = await request.json()
+    paypal_order_id = body.get("paypal_order_id")
+    
+    if not paypal_order_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing paypal_order_id"
+        )
+    
+    # --- IDEMPOTENCY CHECK: if this order was already processed, return success ---
+    existing = db.query(PackageTransaction).filter(
+        PackageTransaction.paypal_order_id == paypal_order_id,
+        PackageTransaction.status == "completed"
+    ).first()
+    
+    if existing:
+        logger.info(f"Idempotent hit: order {paypal_order_id} already completed")
+        return {
+            "message": "Payment already processed",
+            "transaction_id": existing.transaction_id,
+            "status": "completed"
+        }
+    
+    # --- VALIDATE PACKAGE ---
+    package = db.query(VIPPackage).filter(
+        VIPPackage.package_id == package_id,
+        VIPPackage.is_active == True
+    ).first()
+    
+    if not package:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not available"
+        )
+    
+    # --- RATE LIMIT ---
+    five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
+    recent_count = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.created_at >= five_min_ago,
+        PackageTransaction.status != "reject"
+    ).count()
+    
+    if recent_count >= 20:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many payment requests. Please try again later."
+        )
+    
+    # --- STEP 1: Check order status first (maybe already captured by client-side) ---
+    try:
+        token = get_access_token()
+        base_url = _get_base_url()
+        
+        with httpx.Client(timeout=30.0) as client:
+            check_resp = client.get(
+                f"{base_url}/v2/checkout/orders/{paypal_order_id}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            check_resp.raise_for_status()
+            order_info = check_resp.json()
+        
+        order_status = order_info.get("status")
+        logger.info(f"Order {paypal_order_id} current status: {order_status}")
+        
+    except Exception as e:
+        logger.error(f"Failed to check order status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Cannot reach PayPal to verify order. Please try again."
+        )
+    
+    # --- STEP 2: Capture if not already captured ---
+    capture_id = None
+    paid_amount = 0.0
+    
+    if order_status == "APPROVED":
+        # Order approved by user but NOT yet captured — capture it now
+        try:
+            capture_result = capture_order(paypal_order_id)
+            
+            if capture_result["status"] != "COMPLETED":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Payment capture failed. Status: {capture_result['status']}"
+                )
+            
+            capture_id = capture_result.get("capture_id")
+            
+            # Extract paid amount from capture result
+            raw = capture_result.get("raw", {})
+            purchase_units = raw.get("purchase_units", [])
+            if purchase_units:
+                captures = purchase_units[0].get("payments", {}).get("captures", [])
+                if captures:
+                    paid_amount = float(captures[0].get("amount", {}).get("value", "0"))
+            
+            logger.info(f"Server captured order {paypal_order_id}: capture_id={capture_id}, amount=${paid_amount}")
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Server capture failed for {paypal_order_id}: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Payment capture failed on PayPal side. Your account was NOT charged. Please try again."
+            )
+    
+    elif order_status == "COMPLETED":
+        # Already captured (maybe by a previous attempt or client-side fallback)
+        purchase_units = order_info.get("purchase_units", [])
+        if purchase_units:
+            captures = purchase_units[0].get("payments", {}).get("captures", [])
+            if captures:
+                capture_id = captures[0].get("id")
+                paid_amount = float(captures[0].get("amount", {}).get("value", "0"))
+        
+        logger.info(f"Order {paypal_order_id} was already captured: capture_id={capture_id}")
+    
+    else:
+        # Order is in an unexpected state (CREATED, VOIDED, etc.)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Order cannot be processed. Current status: {order_status}. Please create a new payment."
+        )
+    
+    # --- STEP 3: Verify amount ---
+    expected_amount = float(package.price)
+    if abs(paid_amount - expected_amount) > 0.01:
+        logger.warning(
+            f"Amount mismatch for order {paypal_order_id}: "
+            f"paid={paid_amount}, expected={expected_amount}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Payment amount does not match package price"
+        )
+    
+    # --- STEP 4: Activate VIP (same DB transaction as recording the payment) ---
+    try:
+        # Subscription stacking logic
+        if package.package_type == "single_skill":
+            active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+                VIPSubscription.user_id == current_user.user_id,
+                VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+                VIPSubscription.payment_status == "completed",
+                ((VIPPackage.package_type == "single_skill") & (VIPPackage.skill_type == package.skill_type)) |
+                (VIPPackage.package_type == "all_skills")
+            ).order_by(VIPSubscription.end_date.desc()).first()
+        else:
+            active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+                VIPSubscription.user_id == current_user.user_id,
+                VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+                VIPSubscription.payment_status == "completed",
+                VIPPackage.package_type == "all_skills"
+            ).order_by(VIPSubscription.end_date.desc()).first()
+        
+        if active_subscription:
+            start_date = active_subscription.end_date
+        else:
+            start_date = get_vietnam_time().replace(tzinfo=None)
+        
+        end_date = start_date + timedelta(days=package.duration_months * 30)
+        
+        # Create subscription (completed immediately)
+        subscription = VIPSubscription(
+            user_id=current_user.user_id,
+            package_id=package_id,
+            start_date=start_date,
+            end_date=end_date,
+            payment_status="completed",
+            created_at=get_vietnam_time().replace(tzinfo=None)
+        )
+        db.add(subscription)
+        db.flush()  # Get subscription_id without committing yet
+        
+        # Create transaction record (completed immediately)
+        transaction = PackageTransaction(
+            user_id=current_user.user_id,
+            package_id=package_id,
+            subscription_id=subscription.subscription_id,
+            amount=package.price,
+            payment_method="paypal",
+            paypal_order_id=paypal_order_id,
+            status="completed",
+            admin_note=f"Server capture: {capture_id or 'N/A'}",
+            created_at=get_vietnam_time().replace(tzinfo=None)
+        )
+        db.add(transaction)
+        
+        # Activate VIP on user
+        current_user.is_vip = True
+        if current_user.vip_expiry is None or end_date > current_user.vip_expiry:
+            current_user.vip_expiry = end_date
+        
+        # SINGLE COMMIT: payment record + subscription + VIP activation
+        db.commit()
+        
+        logger.info(
+            f"VIP activated for user {current_user.user_id}: "
+            f"package={package.name}, order={paypal_order_id}, capture={capture_id}"
+        )
+        
+        return {
+            "message": "Payment verified and VIP activated!",
+            "transaction_id": transaction.transaction_id,
+            "status": "completed"
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"VIP activation failed after capture: {e}", exc_info=True)
+        # CRITICAL: Money was captured but VIP failed. Log prominently for manual recovery.
+        logger.critical(
+            f"PAYMENT CAPTURED BUT VIP FAILED! "
+            f"user={current_user.user_id}, order={paypal_order_id}, capture={capture_id}, "
+            f"package={package.name}, amount=${paid_amount}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Payment was captured but VIP activation failed. Please contact support with your PayPal order ID."
+        )
+
+
 @router.get("/subscription/history", response_model=List[dict])
 async def get_subscription_history(
     current_user: User = Depends(get_current_student),
