@@ -81,6 +81,33 @@ def warmup_paypal():
         logger.warning(f"PayPal warmup failed: {e}")
         return JSONResponse(content={"status": "ok", "paypal": False}, status_code=200)
 
+@app.get("/debug-capture/{order_id}")
+def debug_capture(order_id: str):
+    """Debug endpoint to test PayPal order check (no auth required, read-only)"""
+    try:
+        from app.utils.paypal_service import get_access_token, _get_base_url
+        import httpx
+        token = get_access_token()
+        base_url = _get_base_url()
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(
+                f"{base_url}/v2/checkout/orders/{order_id}",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+            return JSONResponse(content={
+                "paypal_status": resp.status_code,
+                "paypal_body": resp.json() if resp.status_code < 500 else resp.text[:500],
+                "base_url": base_url,
+                "mode": os.getenv("PAYPAL_MODE", "unknown"),
+            })
+    except Exception as e:
+        import traceback
+        return JSONResponse(content={
+            "error": str(e),
+            "traceback": traceback.format_exc()[-500:],
+            "mode": os.getenv("PAYPAL_MODE", "unknown"),
+        }, status_code=500)
+
 # Include all routes
 app.include_router(api_router)
 app.mount("/static", StaticFiles(directory="static"), name="static")
