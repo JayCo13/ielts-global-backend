@@ -227,57 +227,100 @@ Return your evaluation in the exact JSON format below. All explanations and sugg
 
 Do not include any explanatory text before or after the JSON. Ensure all strings are properly escaped and the rewritten essay includes \\n\\n between paragraphs.'''
 
-    try:
-        # Run BOTH API calls in PARALLEL using asyncio.gather (halves wait time)
-        evaluation_task = client_evaluation.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. You must identify ALL mistakes in student essays and provide accurate band scores according to official IELTS criteria. Always respond in the exact JSON format specified."},
-                {"role": "user", "content": evaluation_prompt}
-            ],
-            temperature=0.6,
-            max_tokens=5000
-        )
-        
-        rewriting_task = client_rewriting.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. Your task is to rewrite student essays to demonstrate Band 8.0+ standard. Always respond in the exact JSON format specified."},
-                {"role": "user", "content": rewriting_prompt}
-            ],
-            temperature=1,
-            max_tokens=6000
-        )
-        
-        # Wait for both with 60s timeout to prevent infinite hangs
-        evaluation_completion, rewriting_completion = await asyncio.wait_for(
-            asyncio.gather(evaluation_task, rewriting_task),
-            timeout=60
-        )
-        
-        # Parse both responses
-        evaluation_result = parse_evaluation_response(evaluation_completion.choices[0].message.content)
-        rewriting_result = parse_rewriting_response(rewriting_completion.choices[0].message.content)
-        
-        # Combine the results
-        evaluation_result["rewritten_essay"] = rewriting_result["rewritten_essay"]
-        
-        return evaluation_result
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="AI evaluation timed out after 60 seconds"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"AI evaluation failed: {str(e)}"
-        )
+    max_retries = 2
+    last_error = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            # Run BOTH API calls in PARALLEL using asyncio.gather (halves wait time)
+            evaluation_task = client_evaluation.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. You must identify ALL mistakes in student essays and provide accurate band scores according to official IELTS criteria. Always respond in the exact JSON format specified."},
+                    {"role": "user", "content": evaluation_prompt}
+                ],
+                temperature=0.6,
+                max_tokens=5000
+            )
+            
+            rewriting_task = client_rewriting.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": "You are an expert IELTS examiner with 15+ years of experience. Your task is to rewrite student essays to demonstrate Band 8.0+ standard. Always respond in the exact JSON format specified."},
+                    {"role": "user", "content": rewriting_prompt}
+                ],
+                temperature=1,
+                max_tokens=6000
+            )
+            
+            # Wait for both with 60s timeout to prevent infinite hangs
+            evaluation_completion, rewriting_completion = await asyncio.wait_for(
+                asyncio.gather(evaluation_task, rewriting_task),
+                timeout=60
+            )
+            
+            # Extract response content with empty checks
+            eval_content = evaluation_completion.choices[0].message.content if evaluation_completion.choices else None
+            rewrite_content = rewriting_completion.choices[0].message.content if rewriting_completion.choices else None
+            
+            if not eval_content or not eval_content.strip():
+                logger.warning(f"Groq returned empty evaluation response (attempt {attempt + 1}/{max_retries + 1})")
+                if attempt < max_retries:
+                    await asyncio.sleep(2 * (attempt + 1))  # Backoff: 2s, 4s
+                    continue
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="AI service returned an empty evaluation response. Please try again."
+                )
+            
+            # Parse both responses
+            evaluation_result = parse_evaluation_response(eval_content)
+            rewriting_result = parse_rewriting_response(rewrite_content or "")
+            
+            # Combine the results
+            evaluation_result["rewritten_essay"] = rewriting_result["rewritten_essay"]
+            
+            return evaluation_result
+        except asyncio.TimeoutError:
+            last_error = "AI evaluation timed out after 60 seconds"
+            if attempt < max_retries:
+                logger.warning(f"Groq timeout (attempt {attempt + 1}/{max_retries + 1}), retrying...")
+                await asyncio.sleep(2)
+                continue
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail=last_error
+            )
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions as-is
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"AI evaluation error (attempt {attempt + 1}/{max_retries + 1}): {last_error}")
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"AI evaluation failed after {max_retries + 1} attempts: {last_error}"
+            )
 
 def parse_evaluation_response(response: str) -> Dict:
+    evaluation = None
+    
     try:
         evaluation = json.loads(response)
-        
+    except json.JSONDecodeError:
+        # Fallback: sanitize control characters and retry
+        try:
+            sanitized = response.replace('\r\n', '\\n').replace('\r', '\\n').replace('\n', '\\n').replace('\t', '\\t')
+            evaluation = json.loads(sanitized)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse AI evaluation response as JSON: {str(e)}"
+            )
+    
+    try:
         # Initialize default structures for missing fields
         default_criteria = {
             "task_achievement": [],
@@ -319,22 +362,55 @@ def parse_evaluation_response(response: str) -> Dict:
         )
 
 def parse_rewriting_response(response: str) -> Dict:
+    import re
+    
     try:
         rewriting = json.loads(response)
-        
         return {
             "rewritten_essay": rewriting.get('rewritten_essay', '')
         }
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to parse AI rewriting response as JSON: {str(e)}"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process AI rewriting response: {str(e)}"
-        )
+    except json.JSONDecodeError:
+        pass
+    
+    # Fallback 1: Sanitize control characters inside JSON string values
+    try:
+        # Replace raw control characters (newlines, tabs, etc.) that break JSON
+        sanitized = response.replace('\r\n', '\\n').replace('\r', '\\n').replace('\n', '\\n').replace('\t', '\\t')
+        rewriting = json.loads(sanitized)
+        return {
+            "rewritten_essay": rewriting.get('rewritten_essay', '').replace('\\n', '\n')
+        }
+    except json.JSONDecodeError:
+        pass
+    
+    # Fallback 2: Extract essay text using regex
+    try:
+        match = re.search(r'"rewritten_essay"\s*:\s*"(.*)"', response, re.DOTALL)
+        if match:
+            essay_text = match.group(1)
+            # Unescape common escape sequences
+            essay_text = essay_text.replace('\\n', '\n').replace('\\t', ' ').replace('\\"', '"')
+            return {"rewritten_essay": essay_text}
+    except Exception:
+        pass
+    
+    # Fallback 3: Just strip JSON wrapper and return raw content
+    try:
+        stripped = response.strip()
+        if stripped.startswith('{'):
+            # Remove the JSON wrapper and extract content  
+            content = stripped.lstrip('{').rstrip('}')
+            match = re.search(r'"rewritten_essay"\s*:\s*"(.+)', content, re.DOTALL)
+            if match:
+                essay_text = match.group(1).rstrip('"').rstrip()
+                essay_text = essay_text.replace('\\n', '\n').replace('\\t', ' ').replace('\\"', '"')
+                return {"rewritten_essay": essay_text}
+    except Exception:
+        pass
+    
+    # Final fallback: return empty essay rather than crashing
+    logger.error(f"All attempts to parse rewriting response failed. Raw response: {response[:500]}")
+    return {"rewritten_essay": ""}
 
 @router.post("/evaluate", response_model=Dict)
 async def evaluate_essay(
