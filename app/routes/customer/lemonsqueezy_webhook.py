@@ -291,6 +291,7 @@ async def _handle_subscription_payment_success(
 
     old_end = subscription.end_date
     new_end = subscription.end_date + timedelta(days=extension_days)
+    subscription.start_date = old_end  # Reset timeline to current billing period
     subscription.end_date = new_end
     subscription.is_auto_renew = True
     subscription.cancelled_at = None  # Reset if was in grace period
