@@ -108,23 +108,23 @@ def send_password_reset_email(to_email: str, reset_token: str, username: str, fr
     reset_link = f"{frontend_url}/reset-password?token={reset_token}"
     
        # Email content
-    subject = f"{SITE_NAME} - Đặt Lại Mật Khẩu"
+    subject = f"{SITE_NAME} - Password Reset"
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-            <h2 style="color: #4a86e8;">{SITE_NAME} - Đặt Lại Mật Khẩu</h2>
-            <p>Xin chào {username},</p>
-            <p>Chúng tôi đã nhận được yêu cầu đặt lại mật khẩu cho tài khoản {SITE_NAME} của bạn.</p>
-            <p>Để đặt lại mật khẩu, vui lòng nhấp vào liên kết dưới đây:</p>
+            <h2 style="color: #4a86e8;">{SITE_NAME} - Password Reset</h2>
+            <p>Hello {username},</p>
+            <p>We received a request to reset the password for your {SITE_NAME} account.</p>
+            <p>To reset your password, please click the link below:</p>
             <p>
                 <a href="{reset_link}" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
-                    Đặt Lại Mật Khẩu
+                    Reset Password
                 </a>
             </p>
-            <p>Liên kết này sẽ hết hạn sau 30 phút.</p>
-            <p>Nếu bạn không yêu cầu đặt lại mật khẩu, vui lòng bỏ qua email này hoặc liên hệ với bộ phận hỗ trợ nếu bạn có thắc mắc.</p>
-            <p>Xin cảm ơn,<br>Đội ngũ {SITE_NAME}</p>
+            <p>This link will expire in 30 minutes.</p>
+            <p>If you did not request a password reset, please ignore this email or contact support if you have any concerns.</p>
+            <p>Thank you,<br>The {SITE_NAME} Team</p>
         </div>
     </body>
     </html>
@@ -147,23 +147,22 @@ def send_account_created_email(to_email: str, username: str, frontend_url: str) 
     login_link = f"{frontend_url}/login"
     
     # Email content
-        # Email content
-    subject = f"{SITE_NAME} - Tài Khoản Đã Được Tạo"
+    subject = f"{SITE_NAME} - Account Created"
     html_content = f"""
     <html>
     <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
         <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-            <h2 style="color: #4a86e8;">Chào mừng đến với {SITE_NAME}!</h2>
-            <p>Xin chào {username},</p>
-            <p>Chúng tôi rất vui mừng thông báo rằng tài khoản {SITE_NAME} của bạn đã được tạo thành công.</p>
-            <p>Bạn có thể đăng nhập ngay bây giờ để truy cập tất cả các tài nguyên luyện thi IELTS của chúng tôi.</p>
+            <h2 style="color: #4a86e8;">Welcome to {SITE_NAME}!</h2>
+            <p>Hello {username},</p>
+            <p>We are pleased to inform you that your {SITE_NAME} account has been successfully created.</p>
+            <p>You can log in now to access all of our IELTS practice resources.</p>
             <p>
                 <a href="{login_link}" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
-                    Đăng Nhập Ngay
+                    Log In Now
                 </a>
             </p>
-            <p>Nếu bạn có bất kỳ câu hỏi hoặc cần hỗ trợ, vui lòng liên hệ với đội ngũ hỗ trợ của chúng tôi.</p>
-            <p>Xin cảm ơn,<br>Đội ngũ {SITE_NAME}</p>
+            <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
+            <p>Thank you,<br>The {SITE_NAME} Team</p>
         </div>
     </body>
     </html>

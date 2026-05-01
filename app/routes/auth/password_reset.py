@@ -176,7 +176,7 @@ async def change_password(
     if request.new_password != request.confirm_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Mật khẩu mới không khớp"
+            detail="New passwords do not match"
         )
 
     is_google_account = bool(current_user.google_id)
@@ -189,20 +189,20 @@ async def change_password(
         if not request.current_password:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Vui lòng nhập mật khẩu hiện tại"
+                detail="Please enter your current password"
             )
 
         if not pwd_context.verify(request.current_password, current_user.password):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Mật khẩu hiện tại không đúng"
+                detail="Current password is incorrect"
             )
 
         # Don't allow same password
         if request.current_password == request.new_password:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Mật khẩu mới phải khác mật khẩu hiện tại"
+                detail="New password must be different from current password"
             )
 
     # Update the password
@@ -211,5 +211,5 @@ async def change_password(
     db.commit()
 
     return {
-        "message": "Đặt mật khẩu thành công" if is_google_account else "Đổi mật khẩu thành công"
+        "message": "Password set successfully" if is_google_account else "Password changed successfully"
     }

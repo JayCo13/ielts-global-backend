@@ -68,7 +68,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 UPLOAD_DIR = "static/student_images"
 DEFAULT_STUDENT_IMAGE = "static/student_images/default-img.png" 
 SECRET_KEY = os.getenv("SECRET_KEY", "latest-secret-key-here-30-Oct")
-SITE_NAME = os.getenv("SITE_NAME", "IELTS Practice")
+SITE_NAME = os.getenv("SITE_NAME", "Ielts Computer Test")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 90
 
@@ -997,17 +997,17 @@ async def register_student(student_data: StudentCreate, db: Session = Depends(ge
             from app.utils.email_utils import send_email
             
             # Create email content
-            subject = f"{SITE_NAME} - Email đã được sử dụng"
+            subject = f"{SITE_NAME} - Email Already In Use"
             html_content = f"""
             <html>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                 <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-                    <h2 style="color: #4a86e8;">{SITE_NAME} - Tài khoản đã tồn tại</h2>
-                    <p>Xin chào,</p>
-                    <p>Chúng tôi nhận thấy bạn đã cố gắng đăng ký với địa chỉ email này, nhưng một tài khoản đã tồn tại.</p>
-                    <p>Nếu bạn quên mật khẩu, bạn có thể đặt lại bằng cách sử dụng liên kết "Quên mật khẩu" trên trang đăng nhập.</p>
-                    <p>Nếu bạn không cố gắng đăng ký, bạn có thể bỏ qua email này.</p>
-                    <p>Cảm ơn bạn,<br>Đội ngũ {SITE_NAME}</p>
+                    <h2 style="color: #4a86e8;">{SITE_NAME} - Account Already Exists</h2>
+                    <p>Hello,</p>
+                    <p>We noticed you attempted to register with this email address, but an account already exists.</p>
+                    <p>If you forgot your password, you can reset it using the "Forgot Password" link on the login page.</p>
+                    <p>If you did not attempt to register, you can safely ignore this email.</p>
+                    <p>Thank you,<br>The {SITE_NAME} Team</p>
                 </div>
             </body>
             </html>
@@ -1085,28 +1085,28 @@ async def register_student(student_data: StudentCreate, db: Session = Depends(ge
             # Customize the welcome email in Vietnamese directly here
             from app.utils.email_utils import send_email
             
-            subject = f"{SITE_NAME} - Chào mừng bạn đến với hệ thống"
+            subject = f"{SITE_NAME} - Welcome to Our Platform"
             html_content = f"""
             <html>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                 <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #eee; border-radius: 5px;">
-                    <h2 style="color: #4a86e8;">Chào mừng đến với {SITE_NAME}!</h2>
-                    <p>Xin chào {new_student.username},</p>
-                    <p>Chúng tôi rất vui mừng thông báo rằng tài khoản Ielttrenmay của bạn đã được tạo thành công.</p>
-                    <p>Bạn có thể đăng nhập ngay bây giờ để truy cập tất cả các tài liệu ôn thi IELTS của chúng tôi.</p>
+                    <h2 style="color: #4a86e8;">Welcome to {SITE_NAME}!</h2>
+                    <p>Hello {new_student.username},</p>
+                    <p>We are pleased to inform you that your {SITE_NAME} account has been successfully created.</p>
+                    <p>You can log in now to access all of our IELTS practice resources.</p>
                     <p>
                         <a href="{frontend_url}/login" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
-                            Đăng nhập ngay
+                            Log In Now
                         </a>
                     </p>
-                    <p>Nếu bạn có bất kỳ câu hỏi hoặc cần hỗ trợ, đừng ngần ngại liên hệ với đội ngũ hỗ trợ của chúng tôi.</p>
-                    <p>Cảm ơn bạn,<br>Đội ngũ {SITE_NAME}</p>
+                    <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
+                    <p>Thank you,<br>The {SITE_NAME} Team</p>
                 </div>
             </body>
             </html>
             """
             
-            # Send the custom Vietnamese email
+            # Send the welcome email
             send_email(new_student.email, subject, html_content)
         except Exception as e:
             print(f"Failed to send welcome email: {str(e)}")

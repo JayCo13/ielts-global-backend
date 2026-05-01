@@ -1224,7 +1224,7 @@ async def submit_exam_answers(
         print(f"EXAM_SUBMIT - Multiple sessions detected for user {current_student.user_id}, blocking submission")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Phát hiện nhiều phiên đăng nhập. Hệ thống sẽ huỷ bỏ bài thi và tự động đăng xuất thiết bị khỏi tài khoản. Nếu phát hiện tài khoản tiếp tục có dấu hiệu chia sẻ, hệ thống sẽ tự động cấm tài khoản vĩnh viễn mà không có sự chấp thuận hay can thiệp của admin."
+            detail="Multiple login sessions detected. Your exam submission has been cancelled and all devices have been logged out. If account sharing continues to be detected, the account will be permanently banned without admin intervention."
         )
     
     print(f"EXAM_SUBMIT - Device check passed, proceeding with submission")
@@ -1905,7 +1905,7 @@ async def submit_complete_writing_test(
     if check_multiple_sessions(db, current_student.user_id, current_session_token):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Phát hiện nhiều phiên đăng nhập. Vui lòng đăng xuất khỏi các thiết bị khác trước khi nộp bài thi."
+            detail="Multiple login sessions detected. Please log out from other devices before submitting your exam."
         )
     
     # Get both tasks for this test
