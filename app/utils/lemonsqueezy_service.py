@@ -88,10 +88,15 @@ def create_checkout(
                 },
                 "product_options": {
                     "enabled_variants": [int(variant_id)],
+                    "redirect_url": os.getenv(
+                        "FRONTEND_URL",
+                        "https://ieltscomputertest.com"
+                    ) + "/my-vip-package",
+                    "receipt_button_text": "Go to My VIP Package",
                     "receipt_link_url": os.getenv(
-                        "LEMONSQUEEZY_RECEIPT_URL",
-                        "https://ieltscomputertest.com/payment-success"
-                    ),
+                        "FRONTEND_URL",
+                        "https://ieltscomputertest.com"
+                    ) + "/my-vip-package",
                 },
             },
             "relationships": {

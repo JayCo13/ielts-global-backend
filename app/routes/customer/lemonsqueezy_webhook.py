@@ -9,6 +9,7 @@ Handled events:
 - subscription_payment_success: Extend VIP (renewal payment)
 - subscription_cancelled: Mark subscription as cancelling (grace period)
 - subscription_expired: Deactivate VIP
+- order_refunded: Deactivate VIP immediately (strict refund policy)
 """
 from fastapi import APIRouter, Depends, Request, HTTPException
 from sqlalchemy.orm import Session
@@ -79,6 +80,9 @@ async def lemonsqueezy_webhook(request: Request, db: Session = Depends(get_db)):
 
         elif event_name == "subscription_expired":
             await _handle_subscription_expired(event, event_data, attrs, db)
+
+        elif event_name == "order_refunded":
+            await _handle_order_refunded(event, event_data, attrs, db)
 
         else:
             logger.info(f"Unhandled Lemon Squeezy event: {event_name}")
@@ -420,4 +424,64 @@ async def _handle_subscription_expired(
     logger.info(
         f"LS subscription_expired: ls_sub={ls_subscription_id}, "
         f"user_id={subscription.user_id}"
+    )
+
+
+async def _handle_order_refunded(event: dict, event_data: dict, attrs: dict, db: Session):
+    """
+    Handle order_refunded event.
+    Strict policy: immediately deactivate VIP and cancel subscription.
+    """
+    custom_data = _extract_custom_data(event)
+    user_id = custom_data.get("user_id")
+    ls_order_id = str(event_data.get("id", ""))
+
+    if not user_id:
+        logger.warning(f"LS order_refunded: no user_id in custom_data, order={ls_order_id}")
+        return
+
+    user_id = int(user_id)
+
+    # Update transaction record to refunded
+    transaction = db.query(PackageTransaction).filter(
+        PackageTransaction.ls_order_id == ls_order_id
+    ).first()
+
+    if transaction:
+        transaction.status = "refunded"
+        logger.info(f"LS order_refunded: transaction {transaction.transaction_id} marked as refunded")
+
+    # Find and deactivate ALL active subscriptions for this user linked to this order
+    subscriptions = db.query(VIPSubscription).filter(
+        VIPSubscription.user_id == user_id,
+        VIPSubscription.payment_status == "completed",
+    ).all()
+
+    for sub in subscriptions:
+        sub.payment_status = "refunded"
+        sub.is_auto_renew = False
+        sub.cancelled_at = get_vietnam_time().replace(tzinfo=None)
+        sub.end_date = get_vietnam_time().replace(tzinfo=None)  # Expire immediately
+
+        # Cancel the LS subscription if still active
+        if sub.ls_subscription_id:
+            try:
+                from app.utils.lemonsqueezy_service import cancel_subscription
+                cancel_subscription(sub.ls_subscription_id)
+                logger.info(f"LS order_refunded: cancelled LS sub {sub.ls_subscription_id}")
+            except Exception as e:
+                logger.warning(f"LS order_refunded: failed to cancel LS sub {sub.ls_subscription_id}: {e}")
+
+    # Deactivate user VIP
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if user:
+        user.is_vip = False
+        user.vip_expiry = get_vietnam_time().replace(tzinfo=None)
+        logger.info(f"LS order_refunded: VIP DEACTIVATED for user_id={user_id}")
+
+    db.commit()
+
+    logger.info(
+        f"LS order_refunded: order={ls_order_id}, user_id={user_id}, "
+        f"subscriptions_deactivated={len(subscriptions)}"
     )
