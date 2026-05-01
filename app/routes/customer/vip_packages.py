@@ -249,6 +249,54 @@ async def cancel_subscription(
         )
 
 
+@router.post("/subscription/resume", response_model=dict)
+async def resume_subscription(
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Resume a cancelled Lemon Squeezy subscription (before it expires).
+    Re-enables auto-renewal so the subscription continues.
+    """
+    from app.utils.lemonsqueezy_service import resume_subscription as ls_resume
+
+    # Find cancelled subscription that hasn't expired yet
+    cancelled_sub = db.query(VIPSubscription).filter(
+        VIPSubscription.user_id == current_user.user_id,
+        VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+        VIPSubscription.payment_status == "completed",
+        VIPSubscription.ls_subscription_id.isnot(None),
+        VIPSubscription.is_auto_renew == False,
+        VIPSubscription.cancelled_at.isnot(None),
+    ).order_by(VIPSubscription.end_date.desc()).first()
+
+    if not cancelled_sub:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No cancelled subscription found to resume."
+        )
+
+    try:
+        result = ls_resume(cancelled_sub.ls_subscription_id)
+
+        # Update local records
+        cancelled_sub.is_auto_renew = True
+        cancelled_sub.cancelled_at = None
+        db.commit()
+
+        return {
+            "message": "Subscription resumed! Auto-renewal is now active.",
+            "renews_at": result.get("renews_at"),
+            "subscription_id": cancelled_sub.subscription_id,
+        }
+    except Exception as e:
+        logger.error(f"Failed to resume LS subscription: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resume subscription. Please try again or contact support."
+        )
+
+
 @router.get("/subscription/manage", response_model=dict)
 async def get_manage_url(
     current_user: User = Depends(get_current_student),

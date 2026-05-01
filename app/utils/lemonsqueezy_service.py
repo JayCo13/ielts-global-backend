@@ -88,10 +88,6 @@ def create_checkout(
                 },
                 "product_options": {
                     "enabled_variants": [int(variant_id)],
-                    "redirect_url": os.getenv(
-                        "LEMONSQUEEZY_REDIRECT_URL",
-                        "https://ieltscomputertest.com/payment-processing"
-                    ),
                     "receipt_link_url": os.getenv(
                         "LEMONSQUEEZY_RECEIPT_URL",
                         "https://ieltscomputertest.com/payment-success"
@@ -198,6 +194,51 @@ def cancel_subscription(ls_subscription_id: str) -> dict:
         "subscription_id": ls_subscription_id,
         "status": status,
         "ends_at": ends_at,
+    }
+
+
+def resume_subscription(ls_subscription_id: str) -> dict:
+    """
+    Resume a cancelled Lemon Squeezy subscription (before it expires).
+    Re-enables auto-renewal so the subscription continues at end of billing period.
+
+    Args:
+        ls_subscription_id: The Lemon Squeezy subscription ID
+
+    Returns:
+        dict with subscription status
+    """
+    payload = {
+        "data": {
+            "type": "subscriptions",
+            "id": str(ls_subscription_id),
+            "attributes": {
+                "cancelled": False,
+            },
+        }
+    }
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.patch(
+            f"{LS_API_BASE}/v1/subscriptions/{ls_subscription_id}",
+            json=payload,
+            headers=_get_headers(),
+        )
+        response.raise_for_status()
+        result = response.json()
+
+    status = result["data"]["attributes"]["status"]
+    renews_at = result["data"]["attributes"].get("renews_at")
+
+    logger.info(
+        f"Lemon Squeezy subscription resumed: {ls_subscription_id}, "
+        f"status={status}, renews_at={renews_at}"
+    )
+
+    return {
+        "subscription_id": ls_subscription_id,
+        "status": status,
+        "renews_at": renews_at,
     }
 
 
