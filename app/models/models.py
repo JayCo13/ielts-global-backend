@@ -104,6 +104,7 @@ class VIPPackage(Base):
     is_active = Column(Boolean, default=True)
     package_type = Column(String(200))
     skill_type = Column(String(200), nullable=True)
+    ls_variant_id = Column(String(50), nullable=True)  # Lemon Squeezy variant ID
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
 
 class VIPSubscription(Base):
@@ -114,7 +115,11 @@ class VIPSubscription(Base):
     package_id = Column(Integer, ForeignKey('vip_packages.package_id'))
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime, nullable=False)
-    payment_status = Column(Enum('pending', 'completed', 'reject', name='payment_status_types'))
+    payment_status = Column(Enum('pending', 'completed', 'reject', 'expired', name='payment_status_types'))
+    ls_subscription_id = Column(String(100), nullable=True, index=True)  # Lemon Squeezy subscription ID
+    ls_customer_id = Column(String(100), nullable=True)  # Lemon Squeezy customer ID
+    is_auto_renew = Column(Boolean, default=True)  # Whether auto-renewal is active
+    cancelled_at = Column(DateTime, nullable=True)  # When user cancelled (grace period)
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
 
     user = relationship("User")
@@ -145,7 +150,7 @@ class PackageTransaction(Base):
     status = Column(Enum('pending', 'completed', 'reject', name='transaction_status_types'))
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
     admin_note = Column(Text, nullable=True)
-    paypal_order_id = Column(String(100), nullable=True, index=True)
+    ls_order_id = Column(String(100), nullable=True, index=True)  # Lemon Squeezy order ID
     user = relationship("User")
     package = relationship("VIPPackage")
     subscription = relationship("VIPSubscription")

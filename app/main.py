@@ -20,7 +20,7 @@ app = FastAPI()
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Redis + pre-warm DB pool + PayPal token on startup"""
+    """Initialize Redis + pre-warm DB pool on startup"""
     await cache.connect()
     # Pre-warm DB connection pool — establish connections eagerly
     try:
@@ -29,13 +29,6 @@ async def startup_event():
         logger.info("Database connection pool pre-warmed successfully")
     except Exception as e:
         logger.warning(f"DB pre-warm failed (will retry on first request): {e}")
-    # Pre-warm PayPal OAuth token so first payment is fast
-    try:
-        from app.utils.paypal_service import get_access_token
-        get_access_token()
-        logger.info("PayPal access token pre-warmed successfully")
-    except Exception as e:
-        logger.warning(f"PayPal token pre-warm failed: {e}")
     logger.info("Application startup completed")
 
 @app.on_event("shutdown")
@@ -69,44 +62,6 @@ def warmup():
     except Exception:
         pass
     return JSONResponse(content={"status": "warm", "db": db_ok}, status_code=200)
-
-# PayPal warmup — pre-cache OAuth token so payment is instant
-@app.get("/warmup-paypal")
-def warmup_paypal():
-    try:
-        from app.utils.paypal_service import get_access_token
-        get_access_token()
-        return JSONResponse(content={"status": "ok", "paypal": True}, status_code=200)
-    except Exception as e:
-        logger.warning(f"PayPal warmup failed: {e}")
-        return JSONResponse(content={"status": "ok", "paypal": False}, status_code=200)
-
-@app.get("/debug-capture/{order_id}")
-def debug_capture(order_id: str):
-    """Debug endpoint to test PayPal order check (no auth required, read-only)"""
-    try:
-        from app.utils.paypal_service import get_access_token, _get_base_url
-        import httpx
-        token = get_access_token()
-        base_url = _get_base_url()
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.get(
-                f"{base_url}/v2/checkout/orders/{order_id}",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            )
-            return JSONResponse(content={
-                "paypal_status": resp.status_code,
-                "paypal_body": resp.json() if resp.status_code < 500 else resp.text[:500],
-                "base_url": base_url,
-                "mode": os.getenv("PAYPAL_MODE", "unknown"),
-            })
-    except Exception as e:
-        import traceback
-        return JSONResponse(content={
-            "error": str(e),
-            "traceback": traceback.format_exc()[-500:],
-            "mode": os.getenv("PAYPAL_MODE", "unknown"),
-        }, status_code=500)
 
 # Include all routes
 app.include_router(api_router)

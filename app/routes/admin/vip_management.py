@@ -23,6 +23,7 @@ async def create_vip_package(
     package_type: str,
     skill_type: str = None,
     description: str = None,
+    ls_variant_id: str = None,
     current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -48,6 +49,7 @@ async def create_vip_package(
         package_type=package_type,
         skill_type=skill_type,
         description=description,
+        ls_variant_id=ls_variant_id,
         is_active=True,
         created_at=get_vietnam_time().replace(tzinfo=None)
     )
@@ -71,6 +73,7 @@ async def get_all_packages(
             "price": p.price,
             "description": p.description,
             "is_active": p.is_active,
+            "ls_variant_id": p.ls_variant_id,
             "created_at": p.created_at
         } for p in packages
     ]
@@ -85,6 +88,7 @@ async def update_package(
     package_type: str = None,
     skill_type: str = None,
     duration_months: int = None,
+    ls_variant_id: str = None,
     current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -122,6 +126,8 @@ async def update_package(
         package.is_active = is_active
     if duration_months is not None:
         package.duration_months = duration_months
+    if ls_variant_id is not None:
+        package.ls_variant_id = ls_variant_id
     
     db.commit()
     return {"message": "Package updated successfully"}
@@ -194,7 +200,7 @@ async def get_all_subscriptions(
                 "payment_method": transaction.payment_method,
                 "status": transaction.status,
                 "admin_note": transaction.admin_note,
-                "paypal_order_id": transaction.paypal_order_id,
+                "ls_order_id": transaction.ls_order_id,
                 "created_at": transaction.created_at
             }
         

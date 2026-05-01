@@ -7,7 +7,7 @@ from .admin.dictation_admin import router as dictation_admin_router
 from .student.reading import router as student_reading_router
 from .student.student_actions import router as student_actions_router
 from .customer.vip_packages import router as customer_vip_router
-from .customer.paypal_webhook import router as paypal_webhook_router
+from .customer.lemonsqueezy_webhook import router as lemonsqueezy_webhook_router
 from .AI.ai import router as ai_router
 from .auth import router as auth_router
 from .admin.multiple_actions import router as multiple_actions_router
@@ -27,7 +27,7 @@ router.include_router(dictation_admin_router, prefix="/admin", tags=["admin-dict
 router.include_router(student_actions_router, prefix="/student", tags=["student"])
 router.include_router(student_reading_router, prefix="/student/reading", tags=["student-reading"])
 router.include_router(customer_vip_router, prefix="/customer/vip", tags=["customer-vip"])
-router.include_router(paypal_webhook_router, prefix="/customer/vip", tags=["paypal-webhook"])
+router.include_router(lemonsqueezy_webhook_router, prefix="/customer/vip", tags=["lemonsqueezy-webhook"])
 router.include_router(student_multiple_actions_router, prefix="/student/action", tags=["student-actions"])
 router.include_router(multiple_actions_router, prefix="/admin/action", tags=["admin-actions"])
 router.include_router(ai_router, prefix="/ai", tags=["ai"])

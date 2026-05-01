@@ -1772,13 +1772,13 @@ async def get_admin_notifications(
     
 
 
-    # Get recent completed PayPal transactions only (success notifications)
+    # Get recent completed Lemon Squeezy transactions only (success notifications)
     recent_transactions = db.query(PackageTransaction, User, VIPPackage)\
         .join(User, User.user_id == PackageTransaction.user_id)\
         .join(VIPPackage, VIPPackage.package_id == PackageTransaction.package_id)\
         .filter(
             PackageTransaction.created_at >= get_vietnam_time().replace(tzinfo=None) - timedelta(days=days),
-            PackageTransaction.payment_method == "paypal",
+            PackageTransaction.payment_method == "lemonsqueezy",
             PackageTransaction.status == "completed"
         )\
         .order_by(PackageTransaction.created_at.desc())\
@@ -1790,11 +1790,11 @@ async def get_admin_notifications(
     # Add transaction notifications
     for transaction, user, package in recent_transactions:
         # Set title/message based on status
-        if transaction.status == "completed" and transaction.payment_method == "paypal":
-            title = "PayPal Payment Successful"
+        if transaction.status == "completed" and transaction.payment_method == "lemonsqueezy":
+            title = "Payment Successful"
             message = f"{user.username} purchased {package.name} (${float(transaction.amount):.2f})"
-        elif transaction.status == "reject" and transaction.payment_method == "paypal":
-            title = "PayPal Payment Failed"
+        elif transaction.status == "reject" and transaction.payment_method == "lemonsqueezy":
+            title = "Payment Failed"
             message = f"{user.username} cancelled {package.name} (${float(transaction.amount):.2f})"
         else:
             title = "VIP Purchase Request"
