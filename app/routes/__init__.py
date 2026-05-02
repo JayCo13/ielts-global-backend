@@ -15,6 +15,7 @@ from .student.multiple_actions import router as student_multiple_actions_router
 from .student.vocabulary_routes import router as vocabulary_router
 from .student.dictation_routes import router as student_dictation_router
 from .public_seo import router as public_seo_router
+from .admin.marketing import router as admin_marketing_router
 
 router = APIRouter()
 
@@ -24,6 +25,7 @@ router.include_router(admin_actions_router, prefix="/admin", tags=["admin"])
 router.include_router(reading_admin_router, prefix="/admin/reading", tags=["reading"])
 router.include_router(admin_vip_router, prefix="/admin/vip", tags=["admin-vip"])
 router.include_router(dictation_admin_router, prefix="/admin", tags=["admin-dictation"])
+router.include_router(admin_marketing_router, prefix="/admin/marketing", tags=["admin-marketing"])
 router.include_router(student_actions_router, prefix="/student", tags=["student"])
 router.include_router(student_reading_router, prefix="/student/reading", tags=["student-reading"])
 router.include_router(customer_vip_router, prefix="/customer/vip", tags=["customer-vip"])
