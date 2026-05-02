@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.routes.auth import get_current_user
+from app.routes.admin.auth import get_current_user
 from app.models.models import User
 from app.utils.email_utils import send_email, is_valid_email
 from pydantic import BaseModel
