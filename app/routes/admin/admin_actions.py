@@ -2280,16 +2280,17 @@ async def update_student_status(
         "is_active": student.is_active
     }
 
-@router.get("/dashboard/exams", response_model=List[dict])
+@router.get("/dashboard/exams")
 async def get_all_exams(
     skip: int = 0,
     limit: int = 100,
     search: Optional[str] = None,
     exam_type: Optional[str] = None,
+    forecast_only: bool = False,
     current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Get all exams — optimized: 3 queries instead of 200+ (N+1 fix)"""
+    """Get exams with server-side pagination. Returns {items, total_count}."""
     
     # Subquery: count attempts per exam in ONE query
     attempt_sub = db.query(
@@ -2309,11 +2310,22 @@ async def get_all_exams(
         query = query.filter(Exam.title.ilike(f"%{search}%"))
     
     if exam_type:
-        query = query.join(ExamSection).filter(ExamSection.section_type == exam_type)
+        query = query.join(ExamSection, ExamSection.exam_id == Exam.exam_id).filter(ExamSection.section_type == exam_type)
+    
+    if forecast_only:
+        # Filter to exams that have at least one forecast section or writing task
+        forecast_section_ids = db.query(ExamSection.exam_id).filter(ExamSection.is_forecast == True).distinct()
+        forecast_writing_ids = db.query(WritingTask.test_id).filter(WritingTask.is_forecast == True).distinct()
+        query = query.filter(
+            Exam.exam_id.in_(forecast_section_ids.union(forecast_writing_ids))
+        )
+    
+    # Get total count BEFORE pagination
+    total_count = query.count()
     
     exams_with_attempts = query.order_by(Exam.created_at.desc()).offset(skip).limit(limit).all()
     
-    # Batch load ALL section types in ONE query instead of N separate queries
+    # Batch load section types for THIS page only
     exam_ids = [exam.exam_id for exam, _ in exams_with_attempts]
     
     if exam_ids:
@@ -2333,7 +2345,7 @@ async def get_all_exams(
         if section_type not in section_map[exam_id]:
             section_map[exam_id].append(section_type)
     
-    return [{
+    items = [{
         "exam_id": exam.exam_id,
         "title": exam.title,
         "created_at": exam.created_at,
@@ -2341,6 +2353,8 @@ async def get_all_exams(
         "section_types": section_map.get(exam.exam_id, []),
         "attempts": attempts or 0
     } for exam, attempts in exams_with_attempts]
+    
+    return {"items": items, "total_count": total_count}
 
 @router.get("/dashboard/forecast-meta", response_model=dict)
 async def get_forecast_meta(
