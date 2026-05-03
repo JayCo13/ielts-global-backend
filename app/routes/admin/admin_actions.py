@@ -2342,6 +2342,66 @@ async def get_all_exams(
         "attempts": attempts or 0
     } for exam, attempts in exams_with_attempts]
 
+@router.get("/dashboard/forecast-meta", response_model=dict)
+async def get_forecast_meta(
+    current_admin = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """Get forecast metadata for ALL exam sections in a single lightweight query.
+    Returns a map of exam_id -> [{part_number, is_forecast, question_types}].
+    Replaces N+1 individual test detail fetches that were crashing the backend."""
+
+    # ONE query to get all sections with forecast-relevant fields
+    sections = db.query(
+        ExamSection.exam_id,
+        ExamSection.section_type,
+        ExamSection.order_number,
+        ExamSection.is_forecast,
+        ExamSection.forecast_title,
+        ExamSection.is_recommended,
+        ExamSection.question_types
+    ).all()
+
+    # Also get writing task forecast info in ONE query
+    writing_tasks = db.query(
+        WritingTask.test_id,
+        WritingTask.task_id,
+        WritingTask.part_number,
+        WritingTask.is_forecast,
+        WritingTask.is_recommended
+    ).all()
+
+    # Build maps
+    section_meta = {}  # exam_id -> [parts]
+    for s in sections:
+        if s.exam_id not in section_meta:
+            section_meta[s.exam_id] = []
+        section_meta[s.exam_id].append({
+            "section_type": s.section_type,
+            "part_number": s.order_number,
+            "is_forecast": bool(s.is_forecast),
+            "forecast_title": s.forecast_title,
+            "is_recommended": bool(s.is_recommended) if s.is_recommended else False,
+            "question_types": s.question_types or []
+        })
+
+    writing_meta = {}  # test_id -> [parts]
+    for t in writing_tasks:
+        if t.test_id not in writing_meta:
+            writing_meta[t.test_id] = []
+        writing_meta[t.test_id].append({
+            "task_id": t.task_id,
+            "part_number": t.part_number,
+            "is_forecast": bool(t.is_forecast),
+            "is_recommended": bool(t.is_recommended) if t.is_recommended else False
+        })
+
+    return {
+        "sections": section_meta,
+        "writing": writing_meta
+    }
+
+
 @router.get("/dashboard/system-logs", response_model=List[dict])
 async def get_system_logs(
     days: int = 7,
