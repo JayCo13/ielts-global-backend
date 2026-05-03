@@ -234,6 +234,7 @@ class ExamSection(Base):
     is_forecast = Column(Boolean, default=False)
     forecast_title = Column(String(200), nullable=True)
     is_recommended = Column(Boolean, default=False)  # Starred/recommended forecast
+    question_types = Column(JSON, nullable=True)  # e.g. ["Multiple Choice", "Matching Headings"]
     exam = relationship("Exam", back_populates="exam_sections")
     questions = relationship("Question", back_populates="section")
 

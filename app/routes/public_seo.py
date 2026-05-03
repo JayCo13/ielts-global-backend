@@ -151,7 +151,8 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
                 "forecast_title": getattr(s, 'forecast_title', None),
                 "completed": False,
                 "attempts_count": 0,
-                "is_recommended": bool(getattr(s, 'is_recommended', False))
+                "is_recommended": bool(getattr(s, 'is_recommended', False)),
+                "question_types": getattr(s, 'question_types', None) or []
             })
 
         result.append({
@@ -186,7 +187,8 @@ async def get_public_reading_forecasts(db: Session = Depends(get_db)):
                 "forecast_title": getattr(s, 'forecast_title', None),
                 "completed": False,
                 "attempts_count": 0,
-                "is_recommended": bool(getattr(s, 'is_recommended', False))
+                "is_recommended": bool(getattr(s, 'is_recommended', False)),
+                "question_types": getattr(s, 'question_types', None) or []
             })
 
         result.append({

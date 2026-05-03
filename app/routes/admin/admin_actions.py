@@ -64,6 +64,7 @@ class ListeningForecastUpdate(BaseModel):
     is_forecast: bool
     forecast_title: Optional[str] = None
     is_recommended: Optional[bool] = None
+    question_types: Optional[List[str]] = None
 
 
 class ExamSectionCreate(BaseModel):
@@ -782,6 +783,7 @@ async def get_listening_test_details(
             "is_forecast": bool(getattr(section, 'is_forecast', False)),
             "forecast_title": getattr(section, 'forecast_title', None),
             "is_recommended": bool(getattr(section, 'is_recommended', False)),
+            "question_types": getattr(section, 'question_types', None) or [],
             "questions": formatted_questions,
         }
         
@@ -817,6 +819,8 @@ async def update_listening_forecast(
     section.forecast_title = update.forecast_title if update.is_forecast else None
     if update.is_recommended is not None:
         section.is_recommended = update.is_recommended
+    if update.question_types is not None:
+        section.question_types = update.question_types
     db.add(section)
     db.commit()
     return {
@@ -824,7 +828,8 @@ async def update_listening_forecast(
         "part_number": update.part_number,
         "is_forecast": section.is_forecast,
         "forecast_title": section.forecast_title,
-        "is_recommended": bool(getattr(section, 'is_recommended', False))
+        "is_recommended": bool(getattr(section, 'is_recommended', False)),
+        "question_types": section.question_types or []
     }
 
 @router.get("/listening-test/{exam_id}/part/{part_number}", response_model=dict)

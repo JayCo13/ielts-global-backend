@@ -57,6 +57,7 @@ class ReadingForecastUpdate(BaseModel):
     is_forecast: bool
     forecast_title: Optional[str] = None
     is_recommended: Optional[bool] = None
+    question_types: Optional[List[str]] = None
 
 
 # Initialize a new reading test
@@ -288,6 +289,7 @@ async def get_reading_test(
             "is_forecast": getattr(section, 'is_forecast', False),
             "forecast_title": getattr(section, 'forecast_title', None),
             "is_recommended": getattr(section, 'is_recommended', False),
+            "question_types": getattr(section, 'question_types', None) or [],
             "expected_questions": expected_count,
             "passage": {
                 "passage_id": passage.passage_id if passage else None,
@@ -324,6 +326,8 @@ async def update_reading_forecast(
     section.forecast_title = update.forecast_title if update.is_forecast else None
     if update.is_recommended is not None:
         section.is_recommended = update.is_recommended
+    if update.question_types is not None:
+        section.question_types = update.question_types
     db.add(section)
     db.commit()
     db.refresh(section)
@@ -333,7 +337,8 @@ async def update_reading_forecast(
         "part_number": update.part_number,
         "is_forecast": section.is_forecast,
         "forecast_title": section.forecast_title,
-        "is_recommended": getattr(section, 'is_recommended', False)
+        "is_recommended": getattr(section, 'is_recommended', False),
+        "question_types": section.question_types or []
     }
 
 class ReadingTestDescriptionsUpdate(BaseModel):

@@ -722,7 +722,8 @@ async def get_listening_forecasts(
                 "forecast_title": getattr(s, 'forecast_title', None),
                 "completed": attempts_count > 0,
                 "attempts_count": attempts_count,
-                "is_recommended": bool(getattr(s, 'is_recommended', False))
+                "is_recommended": bool(getattr(s, 'is_recommended', False)),
+                "question_types": getattr(s, 'question_types', None) or []
             })
 
         result.append({
