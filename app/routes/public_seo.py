@@ -11,7 +11,7 @@ async def get_public_listening_tests(db: Session = Depends(get_db)):
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     exam_ids = [e.exam_id for e in exams]
     if not exam_ids:
@@ -51,7 +51,7 @@ async def get_public_reading_tests(db: Session = Depends(get_db)):
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'reading'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     exam_ids = [e.exam_id for e in exams]
     if not exam_ids:
@@ -91,7 +91,7 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'essay'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     exam_ids = [e.exam_id for e in exams]
     if not exam_ids:
@@ -131,7 +131,7 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     result = []
     for exam in exams:
@@ -167,7 +167,7 @@ async def get_public_reading_forecasts(db: Session = Depends(get_db)):
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'reading'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     result = []
     for exam in exams:

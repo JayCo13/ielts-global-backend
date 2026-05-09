@@ -30,7 +30,7 @@ async def get_available_reading_tests(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'reading'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     if not exams:
         return []
@@ -538,7 +538,7 @@ async def get_reading_forecasts(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'reading'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     result = []
     for exam in exams:

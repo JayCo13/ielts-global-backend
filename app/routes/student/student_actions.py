@@ -478,7 +478,7 @@ async def get_available_listening_exams(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     if not exams:
         return []
@@ -576,7 +576,7 @@ async def get_writing_forecasts(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'essay'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     if not exams:
         return []
@@ -641,7 +641,7 @@ async def get_listening_forecasts(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     result = []
     from sqlalchemy.sql import func
@@ -1735,7 +1735,7 @@ async def get_writing_tasks(
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'essay'
-    ).distinct().all()
+    ).distinct().order_by(Exam.exam_id).all()
 
     if not exams:
         return []
