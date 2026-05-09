@@ -61,3 +61,33 @@ def delete_audio_from_r2(filename: str) -> bool:
     except Exception as e:
         print(f"Error deleting from R2: {e}")
         return False
+
+
+def upload_pdf_to_r2(file_content: bytes, filename: str) -> str:
+    """Upload a PDF file to R2 under the speaking_pdfs/ prefix and return its public URL."""
+    client = get_r2_client()
+    key = f"speaking_pdfs/{filename}"
+    client.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=file_content,
+        ContentType="application/pdf",
+        ContentDisposition="inline",
+    )
+    return f"{R2_PUBLIC_URL}/{key}"
+
+
+def delete_object_from_r2(public_url: str) -> bool:
+    """Delete an object from R2 given its public URL. No-op if URL doesn't point to our R2."""
+    try:
+        if not public_url or not public_url.startswith(R2_PUBLIC_URL):
+            return False
+        key = public_url[len(R2_PUBLIC_URL):].lstrip("/")
+        if not key:
+            return False
+        client = get_r2_client()
+        client.delete_object(Bucket=R2_BUCKET_NAME, Key=key)
+        return True
+    except Exception as e:
+        print(f"Error deleting from R2: {e}")
+        return False

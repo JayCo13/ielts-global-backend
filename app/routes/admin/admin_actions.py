@@ -10,7 +10,6 @@ from pydantic import BaseModel
 import shutil
 from bs4 import BeautifulSoup
 import re
-import os
 from uuid import uuid4
 from sqlalchemy.sql import func
 from sqlalchemy import and_, distinct, or_
@@ -78,7 +77,6 @@ class IELTSExamCreate(BaseModel):
     title: str
     sections: List[ExamSectionCreate]
 
-SPEAKING_PDF_DIR = "static/speaking_pdfs"
 VALID_SPEAKING_PARTS = {"part1", "part2_3"}
 
 @router.post("/speaking/materials", response_model=dict)
@@ -89,19 +87,16 @@ async def create_speaking_material(
     current_admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
+    from app.utils.r2_storage import upload_pdf_to_r2
+
     if part_type not in VALID_SPEAKING_PARTS:
         raise HTTPException(status_code=400, detail="Invalid part_type. Use 'part1' or 'part2_3'")
     if pdf_file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
 
-    os.makedirs(SPEAKING_PDF_DIR, exist_ok=True)
     unique_filename = f"{uuid4()}.pdf"
-    file_path = os.path.join(SPEAKING_PDF_DIR, unique_filename)
-    with open(file_path, "wb") as buffer:
-        content = await pdf_file.read()
-        buffer.write(content)
-
-    pdf_url = f"/static/speaking_pdfs/{unique_filename}"
+    content = await pdf_file.read()
+    pdf_url = upload_pdf_to_r2(content, unique_filename)
 
     material = SpeakingMaterial(
         title=title,
@@ -173,22 +168,16 @@ async def update_speaking_material(
         m.title = title
 
     if pdf_file:
+        from app.utils.r2_storage import upload_pdf_to_r2, delete_object_from_r2
+
         if pdf_file.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-        os.makedirs(SPEAKING_PDF_DIR, exist_ok=True)
         unique_filename = f"{uuid4()}.pdf"
-        file_path = os.path.join(SPEAKING_PDF_DIR, unique_filename)
-        with open(file_path, "wb") as buffer:
-            content = await pdf_file.read()
-            buffer.write(content)
-        # delete old file if exists
-        try:
-            old_path = m.pdf_url.lstrip('/') if m.pdf_url else None
-            if old_path and os.path.exists(old_path):
-                os.remove(old_path)
-        except Exception:
-            pass
-        m.pdf_url = f"/static/speaking_pdfs/{unique_filename}"
+        content = await pdf_file.read()
+        new_url = upload_pdf_to_r2(content, unique_filename)
+        # best-effort cleanup of the previous object if it lived in R2
+        delete_object_from_r2(m.pdf_url)
+        m.pdf_url = new_url
 
     db.add(m)
     db.commit()
@@ -208,16 +197,13 @@ async def delete_speaking_material(
     current_admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
+    from app.utils.r2_storage import delete_object_from_r2
+
     m = db.query(SpeakingMaterial).filter(SpeakingMaterial.material_id == material_id).first()
     if not m:
         raise HTTPException(status_code=404, detail="Material not found")
-    # delete file
-    try:
-        old_path = m.pdf_url.lstrip('/') if m.pdf_url else None
-        if old_path and os.path.exists(old_path):
-            os.remove(old_path)
-    except Exception:
-        pass
+    # best-effort R2 cleanup; legacy local files won't match and are simply ignored
+    delete_object_from_r2(m.pdf_url)
     db.delete(m)
     db.commit()
     return {"message": "Deleted"}
