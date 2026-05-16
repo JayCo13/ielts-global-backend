@@ -1727,6 +1727,9 @@ class ForecastUpdate(BaseModel):
     is_forecast: bool
     title: str | None = None
     is_recommended: bool | None = None
+    # 'pie' | 'map' | 'process' | 'table' | 'line' | 'bar' | 'mixed' | None.
+    # Send empty string to clear. Only meaningful on part_number=1 rows.
+    task1_type: str | None = None
 
 @router.put("/writing-task/{task_id}/forecast", response_model=dict)
 async def update_writing_task_forecast(
@@ -1743,9 +1746,19 @@ async def update_writing_task_forecast(
         task.title = update.title
     if update.is_recommended is not None:
         task.is_recommended = update.is_recommended
+    # Treat empty string as "clear the tag"; only assignable on Part 1.
+    if update.task1_type is not None:
+        task.task1_type = update.task1_type or None
     db.add(task)
     db.commit()
-    return {"message": "Forecast updated", "task_id": task_id, "is_forecast": task.is_forecast, "title": task.title, "is_recommended": bool(getattr(task, 'is_recommended', False))}
+    return {
+        "message": "Forecast updated",
+        "task_id": task_id,
+        "is_forecast": task.is_forecast,
+        "title": task.title,
+        "is_recommended": bool(getattr(task, 'is_recommended', False)),
+        "task1_type": task.task1_type,
+    }
 
 
 
@@ -2395,7 +2408,9 @@ async def get_forecast_meta(
         WritingTask.task_id,
         WritingTask.part_number,
         WritingTask.is_forecast,
-        WritingTask.is_recommended
+        WritingTask.is_recommended,
+        WritingTask.title,
+        WritingTask.task1_type
     ).all()
 
     # Build maps
@@ -2420,7 +2435,9 @@ async def get_forecast_meta(
             "task_id": t.task_id,
             "part_number": t.part_number,
             "is_forecast": bool(t.is_forecast),
-            "is_recommended": bool(t.is_recommended) if t.is_recommended else False
+            "is_recommended": bool(t.is_recommended) if t.is_recommended else False,
+            "title": t.title or "",
+            "task1_type": t.task1_type
         })
 
     return {
