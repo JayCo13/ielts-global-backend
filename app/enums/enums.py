@@ -28,3 +28,14 @@ class KeyTypeEnum(str, Enum):
     LISTENING = "listening"
     SPEAKING = "speaking"
     WRITING = "writing"
+
+class Task1QuestionTypeEnum(str, Enum):
+    PIE = "pie"
+    MAP = "map"
+    PROCESS = "process"
+    TABLE = "table"
+    LINE = "line"
+    BAR = "bar"
+    MIXED = "mixed"
+
+TASK1_QUESTION_TYPE_ORDER = ["pie", "map", "process", "table", "line", "bar", "mixed"]

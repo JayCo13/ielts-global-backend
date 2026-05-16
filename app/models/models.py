@@ -300,6 +300,10 @@ class WritingTask(Base):
     test_id = Column(Integer, ForeignKey('exams.exam_id'))
     part_number = Column(Integer)
     task_type = Column(Enum('essay', 'report', 'letter', name='task_types'))
+    task1_type = Column(
+        Enum('pie', 'map', 'process', 'table', 'line', 'bar', 'mixed', name='task1_question_types'),
+        nullable=True,
+    )
     title = Column(String(200), nullable=True)
     instructions = Column(LONGTEXT)  # Keep using LONGTEXT instead of Text
     word_limit = Column(Integer)

@@ -14,6 +14,7 @@ from uuid import uuid4
 from sqlalchemy.sql import func
 from sqlalchemy import and_, distinct, or_
 from app.utils.datetime_utils import get_vietnam_time
+from app.enums.enums import TASK1_QUESTION_TYPE_ORDER
 
 router = APIRouter()
 class ExamDescriptionUpdate(BaseModel):
@@ -312,6 +313,7 @@ class WritingTestInit(BaseModel):
 class WritingTaskCreate(BaseModel):
     part_number: int  # 1 or 2
     task_type: str  # 'essay', 'report', or 'letter'
+    task1_type: str | None = None  # 'pie' | 'map' | 'process' | 'table' | 'line' | 'bar' | 'mixed'
     title: str | None = None
     instructions: str
     word_limit: int
@@ -1592,6 +1594,7 @@ async def add_writing_task(
         test_id=exam_id,
         part_number=task_data.part_number,
         task_type=task_data.task_type,
+        task1_type=task_data.task1_type,
         title=task_data.title,
         instructions=task_data.instructions,
         word_limit=task_data.word_limit,
@@ -1688,6 +1691,7 @@ async def update_writing_task(
 
     # Update task fields
     existing_task.task_type = task_data.task_type
+    existing_task.task1_type = task_data.task1_type
     existing_task.title = task_data.title
     existing_task.instructions = task_data.instructions
     existing_task.word_limit = task_data.word_limit
@@ -1993,30 +1997,37 @@ async def get_writing_tests(
         .join(ExamSection)\
         .filter(ExamSection.section_type == 'essay')\
         .all()
-    
+
     result = []
     for test in writing_tests:
         tasks = db.query(WritingTask)\
             .filter(WritingTask.test_id == test.exam_id)\
             .order_by(WritingTask.part_number)\
             .all()
-            
+
         # Count total submissions for this test
         submission_count = db.query(func.count(distinct(WritingAnswer.user_id)))\
             .join(WritingTask, WritingTask.task_id == WritingAnswer.task_id)\
             .filter(WritingTask.test_id == test.exam_id)\
             .scalar()
-        
+
+        part1_task1_type = next(
+            (t.task1_type for t in tasks if t.part_number == 1 and t.task1_type),
+            None,
+        )
+
         result.append({
             "test_id": test.exam_id,
             "title": test.title,
             "created_at": test.created_at,
             "is_active": test.is_active,
             "total_submissions": submission_count or 0,
+            "task1_type": part1_task1_type,
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
                 "task_type": task.task_type,
+                "task1_type": task.task1_type,
                 "title": getattr(task, 'title', None),
                 "word_limit": task.word_limit,
                 "duration": task.duration,
@@ -2025,7 +2036,12 @@ async def get_writing_tests(
                 "is_recommended": getattr(task, 'is_recommended', False)
             } for task in tasks]
         })
-    
+
+    # Primary sort: Task 1 question type in fixed order (pie, map, process,
+    # table, line, bar, mixed); rows without a type sort last.
+    type_order = {t: i for i, t in enumerate(TASK1_QUESTION_TYPE_ORDER)}
+    result.sort(key=lambda r: type_order.get(r["task1_type"], len(type_order)))
+
     return result
 
 @router.get("/students/writing/{test_id}", response_model=List[dict])
@@ -2330,16 +2346,27 @@ async def get_all_exams(
             section_map[exam_id] = []
         if section_type not in section_map[exam_id]:
             section_map[exam_id].append(section_type)
-    
+
+    # Batch load task1_type for writing Part 1 tasks so the admin listing can
+    # display and sort by chart type without a per-row request.
+    task1_type_map = {}
+    if exam_ids:
+        part1_rows = db.query(WritingTask.test_id, WritingTask.task1_type).filter(
+            WritingTask.test_id.in_(exam_ids),
+            WritingTask.part_number == 1,
+        ).all()
+        task1_type_map = {test_id: t1 for test_id, t1 in part1_rows if t1}
+
     items = [{
         "exam_id": exam.exam_id,
         "title": exam.title,
         "created_at": exam.created_at,
         "is_active": exam.is_active,
         "section_types": section_map.get(exam.exam_id, []),
+        "task1_type": task1_type_map.get(exam.exam_id),
         "attempts": attempts or 0
     } for exam, attempts in exams_with_attempts]
-    
+
     return {"items": items, "total_count": total_count}
 
 @router.get("/dashboard/forecast-meta", response_model=dict)

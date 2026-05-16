@@ -17,6 +17,7 @@ from sqlalchemy import and_, or_
 from uuid import uuid4
 from pydantic import BaseModel
 from app.utils.datetime_utils import get_vietnam_time, convert_to_vietnam_time
+from app.enums.enums import TASK1_QUESTION_TYPE_ORDER
 from datetime import datetime, timedelta
 from app.utils.redis_cache import cache, get_listening_test_cache_key, get_audio_metadata_cache_key
 import logging
@@ -617,20 +618,32 @@ async def get_writing_forecasts(
         forecast_tasks = tasks_by_exam.get(exam.exam_id, [])
         if not forecast_tasks:
             continue
+        part1_task1_type = next(
+            (t.task1_type for t in forecast_tasks if t.part_number == 1 and t.task1_type),
+            None,
+        )
         result.append({
             "exam_id": exam.exam_id,
             "exam_title": exam.title,
+            "task1_type": part1_task1_type,
             "parts": [{
                 "task_id": t.task_id,
                 "part_number": t.part_number,
                 "title": t.title,
                 "task_type": t.task_type,
+                "task1_type": t.task1_type,
                 "instructions": t.instructions,
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False))
 
             } for t in forecast_tasks]
         })
+
+    # Primary sort: Task 1 question type in fixed order (pie, map, process,
+    # table, line, bar, mixed); rows without a type sort last.
+    type_order = {t: i for i, t in enumerate(TASK1_QUESTION_TYPE_ORDER)}
+    result.sort(key=lambda r: type_order.get(r["task1_type"], len(type_order)))
+
     return result
 
 @router.get("/listening/forecasts", response_model=List[dict])
@@ -1790,16 +1803,23 @@ async def get_writing_tasks(
             continue
         
         answered_count = sum(1 for t in tasks if t.task_id in user_answers_set)
-        
+
+        part1_task1_type = next(
+            (t.task1_type for t in tasks if t.part_number == 1 and t.task1_type),
+            None,
+        )
+
         exam_details.append({
             "test_id": exam.exam_id,
             "title": exam.title,
             "created_at": exam.created_at,
             "is_completed": answered_count == len(tasks),
+            "task1_type": part1_task1_type,
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
                 "task_type": task.task_type,
+                "task1_type": task.task1_type,
                 "instructions": task.instructions,
                 "sample_essay": getattr(task, 'sample_essay', None),
                 "word_limit": task.word_limit,
@@ -1807,6 +1827,11 @@ async def get_writing_tasks(
                 "duration": task.duration
             } for task in tasks]
         })
+
+    # Primary sort: Task 1 question type in fixed order (pie, map, process,
+    # table, line, bar, mixed); rows without a type sort last.
+    type_order = {t: i for i, t in enumerate(TASK1_QUESTION_TYPE_ORDER)}
+    exam_details.sort(key=lambda r: type_order.get(r["task1_type"], len(type_order)))
 
     return exam_details
 
@@ -1837,6 +1862,7 @@ async def get_writing_task_detail(
         "task_id": task.task_id,
         "part_number": task.part_number,
         "task_type": task.task_type,
+        "task1_type": task.task1_type,
         "instructions": task.instructions,
         "sample_essay": getattr(task, 'sample_essay', None),
         "word_limit": task.word_limit,
