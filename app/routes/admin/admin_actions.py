@@ -14,7 +14,7 @@ from uuid import uuid4
 from sqlalchemy.sql import func
 from sqlalchemy import and_, distinct, or_
 from app.utils.datetime_utils import get_vietnam_time
-from app.enums.enums import TASK1_QUESTION_TYPE_ORDER
+from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 
 router = APIRouter()
 class ExamDescriptionUpdate(BaseModel):
@@ -314,6 +314,9 @@ class WritingTaskCreate(BaseModel):
     part_number: int  # 1 or 2
     task_type: str  # 'essay', 'report', or 'letter'
     task1_type: str | None = None  # 'pie' | 'map' | 'process' | 'table' | 'line' | 'bar' | 'mixed'
+    # Task 2 essay flavour: agree_disagree | positive_negative |
+    # advantages_disadvantages | discussion | solutions_effects | two_part_mixed
+    task2_type: str | None = None
     title: str | None = None
     instructions: str
     word_limit: int
@@ -1595,6 +1598,7 @@ async def add_writing_task(
         part_number=task_data.part_number,
         task_type=task_data.task_type,
         task1_type=task_data.task1_type,
+        task2_type=task_data.task2_type,
         title=task_data.title,
         instructions=task_data.instructions,
         word_limit=task_data.word_limit,
@@ -1692,6 +1696,7 @@ async def update_writing_task(
     # Update task fields
     existing_task.task_type = task_data.task_type
     existing_task.task1_type = task_data.task1_type
+    existing_task.task2_type = task_data.task2_type
     existing_task.title = task_data.title
     existing_task.instructions = task_data.instructions
     existing_task.word_limit = task_data.word_limit
@@ -1730,6 +1735,9 @@ class ForecastUpdate(BaseModel):
     # 'pie' | 'map' | 'process' | 'table' | 'line' | 'bar' | 'mixed' | None.
     # Send empty string to clear. Only meaningful on part_number=1 rows.
     task1_type: str | None = None
+    # Task 2 essay flavour. Send empty string to clear. Only meaningful on
+    # part_number=2 rows.
+    task2_type: str | None = None
 
 @router.put("/writing-task/{task_id}/forecast", response_model=dict)
 async def update_writing_task_forecast(
@@ -1749,6 +1757,9 @@ async def update_writing_task_forecast(
     # Treat empty string as "clear the tag"; only assignable on Part 1.
     if update.task1_type is not None:
         task.task1_type = update.task1_type or None
+    # Same convention for Task 2 type on Part 2 rows.
+    if update.task2_type is not None:
+        task.task2_type = update.task2_type or None
     db.add(task)
     db.commit()
     return {
@@ -1758,6 +1769,7 @@ async def update_writing_task_forecast(
         "title": task.title,
         "is_recommended": bool(getattr(task, 'is_recommended', False)),
         "task1_type": task.task1_type,
+        "task2_type": task.task2_type,
     }
 
 
@@ -2028,6 +2040,10 @@ async def get_writing_tests(
             (t.task1_type for t in tasks if t.part_number == 1 and t.task1_type),
             None,
         )
+        part2_task2_type = next(
+            (t.task2_type for t in tasks if t.part_number == 2 and t.task2_type),
+            None,
+        )
 
         result.append({
             "test_id": test.exam_id,
@@ -2036,11 +2052,13 @@ async def get_writing_tests(
             "is_active": test.is_active,
             "total_submissions": submission_count or 0,
             "task1_type": part1_task1_type,
+            "task2_type": part2_task2_type,
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
                 "task_type": task.task_type,
                 "task1_type": task.task1_type,
+                "task2_type": task.task2_type,
                 "title": getattr(task, 'title', None),
                 "word_limit": task.word_limit,
                 "duration": task.duration,
@@ -2360,15 +2378,22 @@ async def get_all_exams(
         if section_type not in section_map[exam_id]:
             section_map[exam_id].append(section_type)
 
-    # Batch load task1_type for writing Part 1 tasks so the admin listing can
-    # display and sort by chart type without a per-row request.
+    # Batch load task1_type / task2_type for writing Part 1 / Part 2 tasks so
+    # the admin listing can display and sort by chart type and essay flavour
+    # without a per-row request.
     task1_type_map = {}
+    task2_type_map = {}
     if exam_ids:
         part1_rows = db.query(WritingTask.test_id, WritingTask.task1_type).filter(
             WritingTask.test_id.in_(exam_ids),
             WritingTask.part_number == 1,
         ).all()
         task1_type_map = {test_id: t1 for test_id, t1 in part1_rows if t1}
+        part2_rows = db.query(WritingTask.test_id, WritingTask.task2_type).filter(
+            WritingTask.test_id.in_(exam_ids),
+            WritingTask.part_number == 2,
+        ).all()
+        task2_type_map = {test_id: t2 for test_id, t2 in part2_rows if t2}
 
     items = [{
         "exam_id": exam.exam_id,
@@ -2377,6 +2402,7 @@ async def get_all_exams(
         "is_active": exam.is_active,
         "section_types": section_map.get(exam.exam_id, []),
         "task1_type": task1_type_map.get(exam.exam_id),
+        "task2_type": task2_type_map.get(exam.exam_id),
         "attempts": attempts or 0
     } for exam, attempts in exams_with_attempts]
 
@@ -2410,7 +2436,8 @@ async def get_forecast_meta(
         WritingTask.is_forecast,
         WritingTask.is_recommended,
         WritingTask.title,
-        WritingTask.task1_type
+        WritingTask.task1_type,
+        WritingTask.task2_type
     ).all()
 
     # Build maps
@@ -2437,7 +2464,8 @@ async def get_forecast_meta(
             "is_forecast": bool(t.is_forecast),
             "is_recommended": bool(t.is_recommended) if t.is_recommended else False,
             "title": t.title or "",
-            "task1_type": t.task1_type
+            "task1_type": t.task1_type,
+            "task2_type": t.task2_type
         })
 
     return {

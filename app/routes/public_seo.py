@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial
-from app.enums.enums import TASK1_QUESTION_TYPE_ORDER
+from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 from typing import List
 
 router = APIRouter()
@@ -116,16 +116,22 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
             (t.task1_type for t in forecast_tasks if t.part_number == 1 and t.task1_type),
             None,
         )
+        part2_task2_type = next(
+            (t.task2_type for t in forecast_tasks if t.part_number == 2 and t.task2_type),
+            None,
+        )
         result.append({
             "exam_id": exam.exam_id,
             "exam_title": exam.title,
             "task1_type": part1_task1_type,
+            "task2_type": part2_task2_type,
             "parts": [{
                 "task_id": t.task_id,
                 "part_number": t.part_number,
                 "title": t.title,
                 "task_type": t.task_type,
                 "task1_type": t.task1_type,
+                "task2_type": t.task2_type,
                 "instructions": "",
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False))

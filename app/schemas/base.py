@@ -32,6 +32,7 @@ class QuestionOptionBase(BaseModel):
 class WritingTaskBase(BaseModel):
     task_type: str
     task1_type: Optional[str] = None
+    task2_type: Optional[str] = None
     instructions: str
     image_url: Optional[str] = None
     essay_prompt: str

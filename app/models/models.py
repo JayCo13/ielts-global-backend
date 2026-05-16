@@ -304,6 +304,18 @@ class WritingTask(Base):
         Enum('pie', 'map', 'process', 'table', 'line', 'bar', 'mixed', name='task1_question_types'),
         nullable=True,
     )
+    task2_type = Column(
+        Enum(
+            'agree_disagree',
+            'positive_negative',
+            'advantages_disadvantages',
+            'discussion',
+            'solutions_effects',
+            'two_part_mixed',
+            name='task2_question_types',
+        ),
+        nullable=True,
+    )
     title = Column(String(200), nullable=True)
     instructions = Column(LONGTEXT)  # Keep using LONGTEXT instead of Text
     word_limit = Column(Integer)

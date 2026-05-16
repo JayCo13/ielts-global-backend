@@ -39,3 +39,20 @@ class Task1QuestionTypeEnum(str, Enum):
     MIXED = "mixed"
 
 TASK1_QUESTION_TYPE_ORDER = ["pie", "map", "process", "table", "line", "bar", "mixed"]
+
+class Task2QuestionTypeEnum(str, Enum):
+    AGREE_DISAGREE = "agree_disagree"
+    POSITIVE_NEGATIVE = "positive_negative"
+    ADVANTAGES_DISADVANTAGES = "advantages_disadvantages"
+    DISCUSSION = "discussion"
+    SOLUTIONS_EFFECTS = "solutions_effects"
+    TWO_PART_MIXED = "two_part_mixed"
+
+TASK2_QUESTION_TYPE_ORDER = [
+    "agree_disagree",
+    "positive_negative",
+    "advantages_disadvantages",
+    "discussion",
+    "solutions_effects",
+    "two_part_mixed",
+]

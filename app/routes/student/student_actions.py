@@ -17,7 +17,7 @@ from sqlalchemy import and_, or_
 from uuid import uuid4
 from pydantic import BaseModel
 from app.utils.datetime_utils import get_vietnam_time, convert_to_vietnam_time
-from app.enums.enums import TASK1_QUESTION_TYPE_ORDER
+from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 from datetime import datetime, timedelta
 from app.utils.redis_cache import cache, get_listening_test_cache_key, get_audio_metadata_cache_key
 import logging
@@ -622,16 +622,22 @@ async def get_writing_forecasts(
             (t.task1_type for t in forecast_tasks if t.part_number == 1 and t.task1_type),
             None,
         )
+        part2_task2_type = next(
+            (t.task2_type for t in forecast_tasks if t.part_number == 2 and t.task2_type),
+            None,
+        )
         result.append({
             "exam_id": exam.exam_id,
             "exam_title": exam.title,
             "task1_type": part1_task1_type,
+            "task2_type": part2_task2_type,
             "parts": [{
                 "task_id": t.task_id,
                 "part_number": t.part_number,
                 "title": t.title,
                 "task_type": t.task_type,
                 "task1_type": t.task1_type,
+                "task2_type": t.task2_type,
                 "instructions": t.instructions,
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False))
@@ -1808,6 +1814,10 @@ async def get_writing_tasks(
             (t.task1_type for t in tasks if t.part_number == 1 and t.task1_type),
             None,
         )
+        part2_task2_type = next(
+            (t.task2_type for t in tasks if t.part_number == 2 and t.task2_type),
+            None,
+        )
 
         exam_details.append({
             "test_id": exam.exam_id,
@@ -1815,11 +1825,13 @@ async def get_writing_tasks(
             "created_at": exam.created_at,
             "is_completed": answered_count == len(tasks),
             "task1_type": part1_task1_type,
+            "task2_type": part2_task2_type,
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
                 "task_type": task.task_type,
                 "task1_type": task.task1_type,
+                "task2_type": task.task2_type,
                 "instructions": task.instructions,
                 "sample_essay": getattr(task, 'sample_essay', None),
                 "word_limit": task.word_limit,
@@ -1863,6 +1875,7 @@ async def get_writing_task_detail(
         "part_number": task.part_number,
         "task_type": task.task_type,
         "task1_type": task.task1_type,
+        "task2_type": task.task2_type,
         "instructions": task.instructions,
         "sample_essay": getattr(task, 'sample_essay', None),
         "word_limit": task.word_limit,
