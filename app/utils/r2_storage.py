@@ -77,6 +77,24 @@ def upload_pdf_to_r2(file_content: bytes, filename: str) -> str:
     return f"{R2_PUBLIC_URL}/{key}"
 
 
+def upload_image_to_r2(file_content: bytes, filename: str, content_type: str = "image/jpeg") -> str:
+    """Upload an image to R2 under the images/ prefix and return its public URL.
+
+    Used for TinyMCE-embedded images (writing task instructions, notifications,
+    etc.) so the URLs survive container redeploys, unlike local /static.
+    """
+    client = get_r2_client()
+    key = f"images/{filename}"
+    client.put_object(
+        Bucket=R2_BUCKET_NAME,
+        Key=key,
+        Body=file_content,
+        ContentType=content_type,
+        ContentDisposition="inline",
+    )
+    return f"{R2_PUBLIC_URL}/{key}"
+
+
 def delete_object_from_r2(public_url: str) -> bool:
     """Delete an object from R2 given its public URL. No-op if URL doesn't point to our R2."""
     try:

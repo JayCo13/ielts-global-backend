@@ -316,32 +316,41 @@ async def upload_notification_image(
     image: UploadFile = File(...),
     current_admin = Depends(get_current_admin)
 ):
-    """Upload an image for notifications and return the URL"""
-    
+    """Upload an image and return its public URL.
+
+    Used by TinyMCE (notifications, writing task instructions) and by the
+    notification image field. Storage is Cloudflare R2 so URLs survive
+    Koyeb container redeploys — the previous local /static path was wiped
+    on every push to main and broke embedded images in writing forecasts.
+    """
+
     # Validate file type (only allow images)
-    content_type = image.content_type
+    content_type = image.content_type or "image/jpeg"
     if not content_type.startswith('image/'):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only image files are allowed"
         )
-    
-    # Create directory if it doesn't exist
-    os.makedirs(NOTIFICATION_IMAGES_DIR, exist_ok=True)
-    
+
     # Generate a unique filename
-    file_extension = os.path.splitext(image.filename)[1]
+    file_extension = os.path.splitext(image.filename or "")[1] or ".jpg"
     unique_filename = f"{uuid4()}{file_extension}"
-    file_path = os.path.join(NOTIFICATION_IMAGES_DIR, unique_filename)
-    
-    # Save the file
-    with open(file_path, "wb") as buffer:
-        content = await image.read()
-        buffer.write(content)
-    
-    # Return the URL path that can be used to access the image
-    image_url = f"/static/notification_images/{unique_filename}"
-    
+
+    content = await image.read()
+
+    try:
+        from app.utils.r2_storage import upload_image_to_r2
+        image_url = upload_image_to_r2(content, unique_filename, content_type=content_type)
+    except Exception as e:
+        # Fall back to local /static if R2 is misconfigured, so admin uploads
+        # don't fail outright. Logs the underlying R2 error for diagnosis.
+        print(f"R2 image upload failed, falling back to /static: {e}")
+        os.makedirs(NOTIFICATION_IMAGES_DIR, exist_ok=True)
+        file_path = os.path.join(NOTIFICATION_IMAGES_DIR, unique_filename)
+        with open(file_path, "wb") as buffer:
+            buffer.write(content)
+        image_url = f"/static/notification_images/{unique_filename}"
+
     return {
         "message": "Image uploaded successfully",
         "image_url": image_url
