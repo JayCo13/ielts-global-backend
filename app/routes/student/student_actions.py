@@ -171,74 +171,95 @@ async def stream_combined_audio(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    # Get all audio files for the specified exam
-    listening_media_files = (
-        db.query(ListeningMedia)
-        .join(ExamSection)
-        .filter(ExamSection.exam_id == exam_id)
-        .order_by(ExamSection.order_number)
-        .all()
-    )
-    
-    if not listening_media_files:
-        raise HTTPException(
-            status_code=404, 
-            detail="No audio files found for this exam"
-        )
-    
-    import requests as http_requests
+    # Disk cache: after first combine per exam, every subsequent request
+    # (including Range / seek requests, of which the browser sends many)
+    # skips the R2 downloads + ffmpeg combine and streams from disk directly.
+    # Cache survives the container's lifetime; it's lost on redeploy/cold
+    # start, where it'll be re-warmed by the next request. To invalidate
+    # after admin re-uploads an audio part, delete static/combined_audio/
+    # exam_{id}.mp3 — see CLAUDE.md "Listening full-test audio cache".
+    cache_dir = "static/combined_audio"
+    os.makedirs(cache_dir, exist_ok=True)
+    cached_path = os.path.join(cache_dir, f"exam_{exam_id}.mp3")
 
-    # Download audio files (from R2 URL or LONGBLOB)
-    temp_files = []
+    temp_files_to_cleanup = []
     total_duration = 0
-    for media in listening_media_files:
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        
-        if media.audio_url:
-            # Download from R2
-            r2_response = http_requests.get(media.audio_url)
-            temp_file.write(r2_response.content)
-        elif media.audio_file:
-            # Legacy: from LONGBLOB
-            temp_file.write(media.audio_file)
-        else:
-            temp_file.close()
-            continue
-            
-        temp_file.close()
-        temp_files.append(temp_file.name)
-        
-        # Calculate duration
+
+    if os.path.exists(cached_path) and os.path.getsize(cached_path) > 0:
+        # Cache hit — skip R2 downloads and ffmpeg entirely.
+        combined_path = cached_path
         try:
-            audio_data_file = open(temp_file.name, "rb")
-            audio = MP3(audio_data_file)
-            total_duration += audio.info.length
-            audio_data_file.close()
+            audio = MP3(combined_path)
+            total_duration = int(audio.info.length)
         except Exception:
             pass
-    
-    if not temp_files:
-        raise HTTPException(status_code=404, detail="No playable audio files found")
-    
-    # Create a temporary file for the combined audio
-    combined_audio_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-    combined_audio_file.close()
-    
-    # Use ffmpeg to combine audio files
-    ffmpeg_command = [
-        "ffmpeg", "-y", "-i", f"concat:{'|'.join(temp_files)}",
-        "-c", "copy", combined_audio_file.name
-    ]
-    subprocess.run(ffmpeg_command, check=True)
-    
+    else:
+        # Cache miss — do the combine and write the result to the cache path.
+        listening_media_files = (
+            db.query(ListeningMedia)
+            .join(ExamSection)
+            .filter(ExamSection.exam_id == exam_id)
+            .order_by(ExamSection.order_number)
+            .all()
+        )
+
+        if not listening_media_files:
+            raise HTTPException(
+                status_code=404,
+                detail="No audio files found for this exam"
+            )
+
+        import requests as http_requests
+
+        # Download audio files (from R2 URL or LONGBLOB) into temp files
+        temp_files = []
+        for media in listening_media_files:
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+
+            if media.audio_url:
+                # Download from R2
+                r2_response = http_requests.get(media.audio_url)
+                temp_file.write(r2_response.content)
+            elif media.audio_file:
+                # Legacy: from LONGBLOB
+                temp_file.write(media.audio_file)
+            else:
+                temp_file.close()
+                continue
+
+            temp_file.close()
+            temp_files.append(temp_file.name)
+
+            # Calculate duration
+            try:
+                audio_data_file = open(temp_file.name, "rb")
+                audio = MP3(audio_data_file)
+                total_duration += audio.info.length
+                audio_data_file.close()
+            except Exception:
+                pass
+
+        if not temp_files:
+            raise HTTPException(status_code=404, detail="No playable audio files found")
+
+        # ffmpeg combine writes directly to cache path (atomic via -y).
+        ffmpeg_command = [
+            "ffmpeg", "-y", "-i", f"concat:{'|'.join(temp_files)}",
+            "-c", "copy", cached_path
+        ]
+        subprocess.run(ffmpeg_command, check=True)
+        combined_path = cached_path
+        temp_files_to_cleanup = temp_files
+        total_duration = int(total_duration)
+
     # Get file size for Content-Length header
-    file_size = os.path.getsize(combined_audio_file.name)
-    
+    file_size = os.path.getsize(combined_path)
+
     # Handle Range header for seeking
     start = 0
     end = file_size - 1
     status_code = 200
-    
+
     # Check if Range header exists
     range_header = request.headers.get("Range", None)
     if range_header:
@@ -249,13 +270,13 @@ async def stream_combined_audio(
             if end_group:
                 end = int(end_group)
             status_code = 206  # Partial Content
-    
+
     # Calculate content length based on range
     content_length = end - start + 1
-    
+
     # Create a file-like object for the response
     def iterfile():
-        with open(combined_audio_file.name, "rb") as f:
+        with open(combined_path, "rb") as f:
             f.seek(start)
             data = f.read(min(content_length, 1024 * 1024))  # Read in 1MB chunks
             while data:
@@ -263,18 +284,15 @@ async def stream_combined_audio(
                 if len(data) < 1024 * 1024:
                     break
                 data = f.read(min(content_length - f.tell() + start, 1024 * 1024))
-        
-        # Clean up temporary files after streaming is complete
-        for temp_file in temp_files:
+
+        # Clean up only the per-request temp files (R2 downloads).
+        # Keep the cached combined file so the next request can reuse it.
+        for temp_file in temp_files_to_cleanup:
             try:
                 os.unlink(temp_file)
             except:
                 pass
-        try:
-            os.unlink(combined_audio_file.name)
-        except:
-            pass
-    
+
     # Set appropriate headers for streaming and seeking
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}" if status_code == 206 else None,
@@ -284,10 +302,10 @@ async def stream_combined_audio(
         "Content-Disposition": f"inline; filename=exam_{exam_id}_combined.mp3",
         "X-Total-Duration": str(int(total_duration))
     }
-    
+
     # Remove None values from headers
     headers = {k: v for k, v in headers.items() if v is not None}
-    
+
     return StreamingResponse(
         iterfile(),
         status_code=status_code,

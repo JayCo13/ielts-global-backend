@@ -1304,7 +1304,17 @@ async def update_listening_part_with_audio(
                 db.add(option)
 
     db.commit()
-    
+
+    # Invalidate the combined-audio disk cache for this exam — see
+    # stream_combined_audio in student_actions.py. The next student request
+    # for /exam/{exam_id}/audio will re-combine from the new R2 parts.
+    cached_combined = os.path.join("static", "combined_audio", f"exam_{exam_id}.mp3")
+    if os.path.exists(cached_combined):
+        try:
+            os.unlink(cached_combined)
+        except Exception:
+            pass
+
     return {
         "message": f"Part {part_number} updated successfully with new audio",
         "section_id": section.section_id,
