@@ -1505,6 +1505,8 @@ async def get_writing_test_details(
     tasks_data = [{
         "part_number": task.part_number,
         "task_type": task.task_type,
+        "task1_type": getattr(task, 'task1_type', None),
+        "task2_type": getattr(task, 'task2_type', None),
         "title": getattr(task, 'title', None),
         "instructions": task.instructions,
         "sample_essay": getattr(task, 'sample_essay', None),
