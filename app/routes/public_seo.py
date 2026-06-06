@@ -259,9 +259,16 @@ SEO_APP_URL = os.getenv("PUBLIC_APP_URL", "https://ieltscomputertest.com").rstri
 
 
 def _seo_base(request):
-    """Public base URL, honouring the reverse proxy's X-Forwarded-Proto/Host so
-    URLs come out as https on Koyeb (which terminates TLS and forwards plain
-    HTTP internally) instead of http."""
+    """Public base URL for canonical/sitemap/internal links.
+
+    If PUBLIC_SEO_BASE_URL is set (e.g. "https://ieltscomputertest.com"), use it
+    verbatim — needed when these pages are reverse-proxied onto the main domain
+    (Netlify/Cloudflare) so the URLs point at the brand domain, not the internal
+    Koyeb host. Otherwise derive from the request, honouring X-Forwarded-Proto so
+    URLs come out https on Koyeb (which terminates TLS and forwards HTTP)."""
+    configured = os.getenv("PUBLIC_SEO_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = (request.headers.get("x-forwarded-host")
             or request.headers.get("host")
