@@ -318,16 +318,16 @@ async def sitemap_exams(request: Request, db: Session = Depends(get_db)):
     base = str(request.base_url).rstrip("/")
     rows = []
     for skill, section_type in SEO_SKILL_SECTION.items():
-        # Per-exam pages (hub: all parts of a test)
-        for exam, _parts in _seo_active_exams(db, section_type):
-            loc = f"{base}/public/t/{skill}/{exam.exam_id}/{_seo_slugify(exam.title)}"
-            lastmod = exam.created_at.date().isoformat() if exam.created_at else None
-            rows.append((loc, lastmod))
-        # Per-part pages (one URL per part, slug = part title)
+        # Group each part under its exam so the sitemap reads: test → its parts.
+        secs_by_exam = {}
         for sec, _exam_title, created in _seo_active_sections(db, section_type):
-            loc = f"{base}/public/p/{skill}/{sec.section_id}/{_seo_slugify(sec.part_title)}"
-            lastmod = created.date().isoformat() if created else None
-            rows.append((loc, lastmod))
+            secs_by_exam.setdefault(sec.exam_id, []).append((sec, created))
+        for exam, _parts in _seo_active_exams(db, section_type):
+            ex_lastmod = exam.created_at.date().isoformat() if exam.created_at else None
+            rows.append((f"{base}/public/t/{skill}/{exam.exam_id}/{_seo_slugify(exam.title)}", ex_lastmod))
+            for sec, created in secs_by_exam.get(exam.exam_id, []):
+                p_lastmod = created.date().isoformat() if created else None
+                rows.append((f"{base}/public/p/{skill}/{sec.section_id}/{_seo_slugify(sec.part_title)}", p_lastmod))
     items = []
     for loc, lastmod in rows:
         lm = f"\n    <lastmod>{lastmod}</lastmod>" if lastmod else ""
