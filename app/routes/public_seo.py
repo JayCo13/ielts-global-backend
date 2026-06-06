@@ -292,6 +292,19 @@ def _seo_active_exams(db, section_type):
     return [(e, by_exam[e.exam_id]) for e in exams if e.exam_id in by_exam]
 
 
+def _seo_active_sections(db, section_type):
+    """Each active section (part) for a skill that has a public part_title, as
+    (section, exam_title, exam_created_at). One crawlable page is generated per
+    part so a specific part name (e.g. "Music alive agency") gets its own URL."""
+    rows = db.query(ExamSection, Exam.title, Exam.created_at).join(
+        Exam, Exam.exam_id == ExamSection.exam_id
+    ).filter(
+        Exam.is_active == True,
+        ExamSection.section_type == section_type
+    ).order_by(Exam.exam_id.desc(), ExamSection.order_number).all()
+    return [(sec, title, created) for sec, title, created in rows if _seo_clean(sec.part_title)]
+
+
 def _seo_not_found():
     return (
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -305,9 +318,15 @@ async def sitemap_exams(request: Request, db: Session = Depends(get_db)):
     base = str(request.base_url).rstrip("/")
     rows = []
     for skill, section_type in SEO_SKILL_SECTION.items():
+        # Per-exam pages (hub: all parts of a test)
         for exam, _parts in _seo_active_exams(db, section_type):
             loc = f"{base}/public/t/{skill}/{exam.exam_id}/{_seo_slugify(exam.title)}"
             lastmod = exam.created_at.date().isoformat() if exam.created_at else None
+            rows.append((loc, lastmod))
+        # Per-part pages (one URL per part, slug = part title)
+        for sec, _exam_title, created in _seo_active_sections(db, section_type):
+            loc = f"{base}/public/p/{skill}/{sec.section_id}/{_seo_slugify(sec.part_title)}"
+            lastmod = created.date().isoformat() if created else None
             rows.append((loc, lastmod))
     items = []
     for loc, lastmod in rows:
@@ -429,6 +448,110 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
   <h2>More IELTS {skill_label} tests</h2>
   <ul class="more">
 {others_html}
+  </ul>
+</body>
+</html>
+"""
+    return HTMLResponse(content=page)
+
+
+@router.get("/p/{skill}/{section_id}", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/p/{skill}/{section_id}/{slug}", response_class=HTMLResponse, include_in_schema=False)
+async def seo_part_page(skill: str, section_id: int, request: Request, slug: str = None,
+                        db: Session = Depends(get_db)):
+    section_type = SEO_SKILL_SECTION.get(skill)
+    if not section_type:
+        return HTMLResponse(_seo_not_found(), status_code=404)
+    sec = db.query(ExamSection).filter(
+        ExamSection.section_id == section_id,
+        ExamSection.section_type == section_type
+    ).first()
+    if not sec or not _seo_clean(sec.part_title):
+        return HTMLResponse(_seo_not_found(), status_code=404)
+    exam = db.query(Exam).filter(Exam.exam_id == sec.exam_id, Exam.is_active == True).first()
+    if not exam:
+        return HTMLResponse(_seo_not_found(), status_code=404)
+
+    skill_label = skill.capitalize()
+    part_title = _seo_clean(sec.part_title)
+    exam_title = _seo_clean(exam.title) or f"IELTS {skill_label} Test"
+    base = str(request.base_url).rstrip("/")
+    canonical = f"{base}/public/p/{skill}/{section_id}/{_seo_slugify(part_title)}"
+    qtypes = [q for q in (sec.question_types or []) if isinstance(q, str)]
+    title_tag = f"{part_title} — IELTS {skill_label} Practice | ieltscomputertest.com"
+    description = (
+        f"Practice \"{part_title}\" — Part {sec.order_number} of {exam_title}, "
+        f"IELTS {skill_label} computer test. "
+        + (f"Question types: {', '.join(qtypes)}. " if qtypes else "")
+        + "Free practice on a 100% real exam interface at ieltscomputertest.com."
+    )[:300]
+
+    # sibling parts of the same exam (internal links)
+    siblings = db.query(ExamSection).filter(
+        ExamSection.exam_id == sec.exam_id,
+        ExamSection.section_type == section_type
+    ).order_by(ExamSection.order_number).all()
+    siblings_html = "\n".join(
+        f'      <li><a href="{base}/public/p/{skill}/{s.section_id}/{_seo_slugify(s.part_title)}">'
+        f'Part {s.order_number} — {html_lib.escape(_seo_clean(s.part_title))}</a></li>'
+        for s in siblings if _seo_clean(s.part_title) and s.section_id != section_id
+    )
+    qtypes_html = (
+        "<p>Question types: " + ", ".join(html_lib.escape(q) for q in qtypes) + ".</p>"
+        if qtypes else ""
+    )
+    json_ld = json.dumps({
+        "@context": "https://schema.org",
+        "@type": "LearningResource",
+        "name": part_title,
+        "url": canonical,
+        "learningResourceType": "IELTS practice test part",
+        "educationalLevel": "IELTS",
+        "inLanguage": "en",
+        "about": f"IELTS {skill_label}",
+        "isPartOf": exam_title,
+        "isAccessibleForFree": True,
+        "provider": {
+            "@type": "EducationalOrganization",
+            "name": "ieltscomputertest.com",
+            "url": SEO_APP_URL,
+        },
+    }, ensure_ascii=False)
+    app_link = f"{SEO_APP_URL}/{skill}_list"
+    exam_link = f"{base}/public/t/{skill}/{exam.exam_id}/{_seo_slugify(exam.title)}"
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="index, follow, max-image-preview:large">
+  <title>{html_lib.escape(title_tag)}</title>
+  <meta name="description" content="{html_lib.escape(description)}">
+  <link rel="canonical" href="{html_lib.escape(canonical)}">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="{html_lib.escape(title_tag)}">
+  <meta property="og:description" content="{html_lib.escape(description)}">
+  <meta property="og:url" content="{html_lib.escape(canonical)}">
+  <meta property="og:site_name" content="ieltscomputertest.com">
+  <script type="application/ld+json">{json_ld}</script>
+  <style>
+    body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0e233a;max-width:760px;margin:0 auto;padding:24px;line-height:1.6}}
+    a{{color:#0096b1}}
+    .crumb{{font-size:14px;color:#6b7280;margin-bottom:8px}}
+    h1{{font-size:28px;margin:.2em 0}}
+    .cta{{display:inline-block;margin:20px 0;background:linear-gradient(90deg,#c98825,#e4b231);color:#fff;font-weight:700;padding:14px 28px;border-radius:12px;text-decoration:none}}
+    ul{{list-style:none;padding:0}} li{{padding:8px 0;border-bottom:1px solid #eef1f4}}
+  </style>
+</head>
+<body>
+  <nav class="crumb"><a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a> / <a href="{exam_link}">{html_lib.escape(exam_title)}</a> / Part {sec.order_number}</nav>
+  <h1>{html_lib.escape(part_title)}</h1>
+  <p><strong>{html_lib.escape(part_title)}</strong> is Part {sec.order_number} of <a href="{exam_link}">{html_lib.escape(exam_title)}</a> — IELTS {skill_label} on the computer-based test. Practice it on a 100% real exam interface.</p>
+  {qtypes_html}
+  <a class="cta" href="{app_link}">Start practicing on ieltscomputertest.com →</a>
+  <h2>Other parts of {html_lib.escape(exam_title)}</h2>
+  <ul>
+{siblings_html}
   </ul>
 </body>
 </html>
