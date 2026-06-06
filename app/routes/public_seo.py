@@ -258,6 +258,17 @@ SEO_SKILL_SECTION = {"listening": "listening", "reading": "reading", "writing": 
 SEO_APP_URL = os.getenv("PUBLIC_APP_URL", "https://ieltscomputertest.com").rstrip("/")
 
 
+def _seo_base(request):
+    """Public base URL, honouring the reverse proxy's X-Forwarded-Proto/Host so
+    URLs come out as https on Koyeb (which terminates TLS and forwards plain
+    HTTP internally) instead of http."""
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = (request.headers.get("x-forwarded-host")
+            or request.headers.get("host")
+            or request.url.netloc)
+    return f"{proto}://{host}".rstrip("/")
+
+
 def _seo_clean(text):
     """Strip any HTML tags and collapse whitespace for safe display."""
     text = re.sub(r"<[^>]+>", " ", text or "")
@@ -315,7 +326,7 @@ def _seo_not_found():
 
 @router.get("/sitemap-exams.xml", include_in_schema=False)
 async def sitemap_exams(request: Request, db: Session = Depends(get_db)):
-    base = str(request.base_url).rstrip("/")
+    base = _seo_base(request)
     rows = []
     for skill, section_type in SEO_SKILL_SECTION.items():
         # Group each part under its exam so the sitemap reads: test → its parts.
@@ -365,7 +376,7 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
 
     skill_label = skill.capitalize()
     exam_title = _seo_clean(exam.title) or f"IELTS {skill_label} Test"
-    base = str(request.base_url).rstrip("/")
+    base = _seo_base(request)
     canonical = f"{base}/public/t/{skill}/{exam_id}/{_seo_slugify(exam.title)}"
     part_titles = [t for _n, t in parts]
     title_tag = f"{exam_title} — IELTS {skill_label} Computer Test | ieltscomputertest.com"
@@ -475,7 +486,7 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
     skill_label = skill.capitalize()
     part_title = _seo_clean(sec.part_title)
     exam_title = _seo_clean(exam.title) or f"IELTS {skill_label} Test"
-    base = str(request.base_url).rstrip("/")
+    base = _seo_base(request)
     canonical = f"{base}/public/p/{skill}/{section_id}/{_seo_slugify(part_title)}"
     qtypes = [q for q in (sec.question_types or []) if isinstance(q, str)]
     title_tag = f"{part_title} — IELTS {skill_label} Practice | ieltscomputertest.com"
