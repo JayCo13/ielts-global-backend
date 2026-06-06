@@ -67,7 +67,16 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 UPLOAD_DIR = "static/student_images"
 DEFAULT_STUDENT_IMAGE = "static/student_images/default-img.png" 
-SECRET_KEY = os.getenv("SECRET_KEY", "latest-secret-key-here-30-Oct")
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    # No hardcoded fallback secret: a shared default in source means anyone who
+    # reads the repo can forge JWTs. Production MUST set SECRET_KEY in the env
+    # (Koyeb already does). If it is missing we generate a random per-process key
+    # so the app still boots in dev — sessions just won't survive a restart until
+    # SECRET_KEY is configured.
+    SECRET_KEY = secrets.token_urlsafe(64)
+    print("⚠️  SECRET_KEY env var not set — using a temporary random key. "
+          "Set SECRET_KEY in the environment for stable, secure sessions.")
 SITE_NAME = os.getenv("SITE_NAME", "Ielts Computer Test")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 90
