@@ -78,17 +78,18 @@ def send_email(to_email: str, subject: str, html_content: str) -> bool:
     message.attach(html_part)
     
     try:
-        # Connect to SMTP server
-        server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
+        # Connect to SMTP server. The explicit timeout keeps a dead/blocked
+        # SMTP connection from hanging the request worker indefinitely.
+        server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=15)
         server.starttls()
         server.login(EMAIL_USERNAME, EMAIL_PASSWORD)
-        
+
         # Send email
         server.sendmail(EMAIL_USERNAME, to_email, message.as_string())
         server.quit()
         return True
     except Exception as e:
-        print(f"Failed to send email: {str(e)}")
+        print(f"Failed to send email to {to_email} via {EMAIL_HOST}:{EMAIL_PORT}: {type(e).__name__}: {str(e)}")
         return False
 
 def send_password_reset_email(to_email: str, reset_token: str, username: str, frontend_url: str) -> bool:

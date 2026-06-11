@@ -18,6 +18,10 @@ router = APIRouter()
 class ReadingExamSubmission(BaseModel):
     answers: Dict[str, str]  # question_id -> student_answer
 
+READING_TESTS_STATIC_CACHE_KEY = "reading-tests:static:v1"
+READING_TESTS_STATIC_CACHE_TTL = 120  # seconds — new/edited exams show up within 2 minutes
+
+
 @router.get("/reading-tests", response_model=List[dict])
 async def get_available_reading_tests(
     current_student = Depends(get_current_student),
@@ -25,34 +29,71 @@ async def get_available_reading_tests(
 ):
     """Get all available reading tests for students"""
     from sqlalchemy import and_
-    
-    # 1) Get all active exams with reading sections (ONE query)
-    exams = db.query(Exam).join(ExamSection).filter(
-        Exam.is_active == True,
-        ExamSection.section_type == 'reading'
-    ).distinct().order_by(Exam.exam_id).all()
 
-    if not exams:
+    # The exam/access/section data is identical for every student — cache it
+    # briefly in Redis to skip 3 TiDB round-trips per page load. Per-user
+    # results (is_completed / total_score) are still queried live below, so
+    # they are never stale. If Redis is unavailable, cache.get returns None
+    # and this behaves exactly like the uncached version.
+    static_data = await cache.get(READING_TESTS_STATIC_CACHE_KEY)
+
+    if not static_data:
+        # 1) Get all active exams with reading sections (ONE query)
+        exams = db.query(Exam).join(ExamSection).filter(
+            Exam.is_active == True,
+            ExamSection.section_type == 'reading'
+        ).distinct().order_by(Exam.exam_id).all()
+
+        if not exams:
+            return []
+
+        exam_ids_q = [e.exam_id for e in exams]
+
+        # 2) Batch load all access types (ONE query)
+        all_access = db.query(ExamAccessType).filter(
+            ExamAccessType.exam_id.in_(exam_ids_q)
+        ).all()
+
+        # 3) Batch load all reading sections (ONE query)
+        all_sections = db.query(ExamSection).filter(
+            ExamSection.exam_id.in_(exam_ids_q),
+            ExamSection.section_type == 'reading'
+        ).order_by(ExamSection.order_number).all()
+
+        static_data = {
+            "exams": [
+                {
+                    "exam_id": e.exam_id,
+                    "title": e.title,
+                    "created_at": e.created_at.isoformat() if e.created_at else None
+                }
+                for e in exams
+            ],
+            "access": [[a.exam_id, a.access_type] for a in all_access],
+            "sections": [
+                {
+                    "exam_id": s.exam_id,
+                    "order_number": s.order_number,
+                    "part_title": s.part_title,
+                    "duration": s.duration,
+                    "total_marks": s.total_marks
+                }
+                for s in all_sections
+            ]
+        }
+        await cache.set(READING_TESTS_STATIC_CACHE_KEY, static_data, ttl=READING_TESTS_STATIC_CACHE_TTL)
+
+    exam_ids = [e["exam_id"] for e in static_data["exams"]]
+    if not exam_ids:
         return []
 
-    exam_ids = [e.exam_id for e in exams]
-
-    # 2) Batch load all access types (ONE query)
-    all_access = db.query(ExamAccessType).filter(
-        ExamAccessType.exam_id.in_(exam_ids)
-    ).all()
     access_by_exam = {}
-    for a in all_access:
-        access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
+    for exam_id, access_type in static_data["access"]:
+        access_by_exam.setdefault(exam_id, []).append(access_type)
 
-    # 3) Batch load all reading sections (ONE query)
-    all_sections = db.query(ExamSection).filter(
-        ExamSection.exam_id.in_(exam_ids),
-        ExamSection.section_type == 'reading'
-    ).order_by(ExamSection.order_number).all()
     sections_by_exam = {}
-    for s in all_sections:
-        sections_by_exam.setdefault(s.exam_id, []).append(s)
+    for s in static_data["sections"]:
+        sections_by_exam.setdefault(s["exam_id"], []).append(s)
 
     # 4) Batch load latest results per exam (ONE query)
     latest_results_sub = db.query(
@@ -86,29 +127,29 @@ async def get_available_reading_tests(
 
     # Build response using pre-loaded data
     exam_details = []
-    for exam in exams:
-        exam_types = access_by_exam.get(exam.exam_id, [])
+    for exam in static_data["exams"]:
+        exam_types = access_by_exam.get(exam["exam_id"], [])
         if not any(at in allowed_types for at in exam_types):
             continue
-        
-        sections = sections_by_exam.get(exam.exam_id, [])
+
+        sections = sections_by_exam.get(exam["exam_id"], [])
         if not sections:
             continue
-        
+
         first_section = sections[0]
         part_titles = {}
         for s in sections:
-            if s.part_title:
-                part_titles[s.order_number] = s.part_title
-        
-        latest = results_by_exam.get(exam.exam_id)
-        
+            if s["part_title"]:
+                part_titles[s["order_number"]] = s["part_title"]
+
+        latest = results_by_exam.get(exam["exam_id"])
+
         exam_details.append({
-            "exam_id": exam.exam_id,
-            "title": exam.title,
-            "created_at": exam.created_at,
-            "duration": first_section.duration,
-            "total_marks": first_section.total_marks,
+            "exam_id": exam["exam_id"],
+            "title": exam["title"],
+            "created_at": exam["created_at"],
+            "duration": first_section["duration"],
+            "total_marks": first_section["total_marks"],
             "is_completed": latest is not None,
             "total_score": latest.total_score if latest else 0,
             "part_titles": part_titles
