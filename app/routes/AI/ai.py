@@ -126,12 +126,11 @@ async def evaluate_with_groq(essay_text: str, instructions: str, part_number: in
    **Task 1 (Academic):** Must describe visual data accurately, highlight key features, make comparisons, use appropriate academic language
    **Task 2:** Must address all parts of the question, present clear position, develop arguments with examples, maintain formal academic tone
 
-4. **VIETNAMESE TRANSLATION REQUIREMENTS:**
-   - ALL mistake explanations MUST be written in accurate, natural Vietnamese
-   - ALL improvement suggestions MUST be written in fluent, precise Vietnamese
-   - Use proper Vietnamese grammar, vocabulary, and sentence structure
-   - Avoid direct translations - use natural Vietnamese expressions
-   - Use formal, educational tone appropriate for language learning
+4. **LANGUAGE REQUIREMENTS:**
+   - ALL mistake explanations MUST be written in clear, natural English
+   - ALL improvement suggestions MUST be written in fluent, precise English
+   - Use proper English grammar, vocabulary, and sentence structure
+   - Use a formal, educational tone appropriate for language learning
 
 **JSON OUTPUT REQUIREMENTS:**
 - Your response MUST be valid JSON format
@@ -148,7 +147,7 @@ async def evaluate_with_groq(essay_text: str, instructions: str, part_number: in
 6. Provide comprehensive feedback with ALL identified mistakes
 7. Provide clear and concise improvement suggestions for ALL mistakes
 8. Rewrite the mistake phrase with the corrected version
-Return your evaluation in the exact JSON format below. All explanations and suggestions MUST be in accurate, natural Vietnamese.
+Return your evaluation in the exact JSON format below. All explanations and suggestions MUST be in clear, natural English.
 
 {{
     "band_score": "<overall_score>",
@@ -160,16 +159,16 @@ Return your evaluation in the exact JSON format below. All explanations and sugg
     }},
     "mistakes": {{
         "task_achievement": [
-            {{"phrase": "<original_text>", "explanation": "<loi_bang_tieng_viet>"}}
+            {{"phrase": "<original_text>", "explanation": "<explanation_in_english>"}}
         ],
         "coherence_cohesion": [
-            {{"phrase": "<original_text>", "explanation": "<loi_bang_tieng_viet>"}}
+            {{"phrase": "<original_text>", "explanation": "<explanation_in_english>"}}
         ],
         "lexical_resource": [
-            {{"phrase": "<original_text>", "explanation": "<loi_bang_tieng_viet>"}}
+            {{"phrase": "<original_text>", "explanation": "<explanation_in_english>"}}
         ],
         "grammatical_range": [
-            {{"phrase": "<original_text>", "explanation": "<loi_bang_tieng_viet>"}}
+            {{"phrase": "<original_text>", "explanation": "<explanation_in_english>"}}
         ]
     }},
     "improvement_suggestions": {{
