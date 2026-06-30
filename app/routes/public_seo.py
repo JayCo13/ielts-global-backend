@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial
+from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial, ExamAccessType
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 from typing import List
 
@@ -331,6 +331,157 @@ def _seo_not_found():
     )
 
 
+def _seo_exam_is_free(db, exam_id):
+    """An exam is "free" (no VIP required) iff it carries a 'no vip' access_type
+    — the exact signal check_exam_access() uses to admit a non-VIP customer
+    (routes/admin/auth.py). This is the authoritative gate; the frontend's
+    first-6 blur is only a display teaser and is intentionally not used here."""
+    rows = db.query(ExamAccessType.access_type).filter(
+        ExamAccessType.exam_id == exam_id
+    ).all()
+    return any(r[0] == 'no vip' for r in rows)
+
+
+# Shared stylesheet for the public SEO landing pages. Plain (non f-string) so the
+# CSS braces don't need escaping; injected via {_SEO_CSS} into each page.
+_SEO_CSS = """
+    :root{--navy:#0b1f38;--navy2:#123c63;--teal:#0096b1;--teal2:#34c6da;--gold1:#d39a2e;--gold2:#f3c54e;--ink:#1f2d3d;--muted:#6b7a8d;--line:#e6ecf3;--bg:#eef3f8}
+    *{box-sizing:border-box}
+    html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+    body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--ink);line-height:1.6;background:var(--bg)}
+    a{color:var(--teal);text-decoration:none}a:hover{text-decoration:underline}
+    .hero{position:relative;overflow:hidden;color:#fff;background:radial-gradient(820px 460px at 88% -22%,rgba(52,198,218,.36),transparent 60%),radial-gradient(680px 460px at -8% 116%,rgba(243,197,78,.16),transparent 56%),linear-gradient(158deg,#0b1f38 0%,#123c63 60%,#0d2c4c 100%)}
+    .nav{max-width:1060px;margin:0 auto;padding:18px 24px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;z-index:2}
+    .brand{display:flex;align-items:center;gap:12px}
+    .brand:hover{text-decoration:none}
+    .brand img{height:62px;width:auto;display:block;filter:drop-shadow(0 6px 14px rgba(0,0,0,.3))}
+    .brand-tx{font-weight:800;font-size:17px;color:#fff;letter-spacing:-.01em}
+    .brand-tx b{color:#fff;font-weight:800}
+    .nav-cta{font-weight:700;font-size:14px;color:#fff;border:1px solid rgba(255,255,255,.26);padding:10px 18px;border-radius:11px;background:rgba(255,255,255,.08);white-space:nowrap}
+    .nav-cta:hover{text-decoration:none;background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.5)}
+    .hero-in{max-width:1060px;margin:0 auto;padding:30px 24px 96px;position:relative;z-index:2;text-align:center}
+    .crumb{font-size:13px;color:rgba(255,255,255,.58);margin:4px 0 22px}
+    .crumb a{color:rgba(255,255,255,.8)}.crumb a:hover{color:#fff}
+    .badge{display:inline-flex;align-items:center;gap:9px;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);color:#d9f4fb;font-weight:700;font-size:12px;letter-spacing:.06em;padding:8px 15px;border-radius:999px;margin-bottom:20px;text-transform:uppercase}
+    .badge::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--teal2);box-shadow:0 0 0 4px rgba(52,198,218,.22)}
+    h1{font-size:clamp(30px,5.6vw,54px);line-height:1.06;letter-spacing:-.025em;margin:0 auto 18px;max-width:20ch;font-weight:800}
+    .lead{font-size:clamp(16px,2vw,20px);color:rgba(255,255,255,.84);margin:0 auto 26px;max-width:58ch}
+    .lead strong{color:#fff}.lead a{color:#9fe6f3}
+    .chips{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 32px;justify-content:center}
+    .chip{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.17);color:#eaf7fa;font-weight:600;font-size:13px;padding:9px 15px;border-radius:11px}
+    .chip::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--gold2)}
+    .cta-row{display:flex;flex-direction:column;align-items:center;gap:16px}
+    .cta{display:inline-flex;align-items:center;gap:10px;background:linear-gradient(92deg,var(--gold1),var(--gold2));color:#241803;font-weight:800;font-size:17px;padding:18px 36px;border-radius:14px;border:0;cursor:pointer;box-shadow:0 16px 36px rgba(243,197,78,.34);transition:transform .14s,box-shadow .14s}
+    .cta:hover{text-decoration:none;transform:translateY(-2px);box-shadow:0 22px 44px rgba(243,197,78,.46)}
+    .lock{display:inline-flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#ffe6b0;background:rgba(243,197,78,.12);border:1px solid rgba(243,197,78,.34);padding:9px 17px;border-radius:999px}
+    .lock svg{flex:none;color:var(--gold2)}
+    .wave{position:absolute;left:0;right:0;bottom:-1px;width:100%;height:72px;display:block;z-index:1}
+    .wrap{max-width:1060px;margin:0 auto;padding:34px 24px 8px}
+    .sec{margin:0 0 16px;font-size:clamp(20px,2.6vw,27px);color:var(--navy);font-weight:800;letter-spacing:-.015em;text-align:center}
+    .parts{list-style:none;padding:0;margin:0 0 40px;display:grid;grid-template-columns:repeat(auto-fill,minmax(278px,1fr));gap:14px}
+    .parts a,.parts .pi{display:flex;align-items:center;gap:14px;padding:18px;border:1px solid var(--line);border-radius:16px;background:#fff;color:var(--navy);font-weight:600;box-shadow:0 2px 10px rgba(11,31,56,.04);transition:border-color .14s,transform .14s,box-shadow .14s}
+    .parts a:hover{text-decoration:none;border-color:var(--teal);transform:translateY(-3px);box-shadow:0 18px 34px rgba(11,31,56,.12)}
+    .parts a::after{content:"\\2192";margin-left:auto;color:var(--teal);font-weight:800;font-size:19px;transition:transform .14s}
+    .parts a:hover::after{transform:translateX(3px)}
+    .pn{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:38px;height:38px;padding:0 9px;background:linear-gradient(135deg,#e7f7ec,#d3eede);color:#1f7a44;font-weight:800;font-size:13px;border-radius:11px}
+    .ft{background:#fff;border-top:1px solid var(--line);margin-top:24px}
+    .ft-in{max-width:1060px;margin:0 auto;padding:30px 24px;display:flex;align-items:center;justify-content:center;text-align:center;gap:14px;color:#8a98a8;font-size:13px;flex-wrap:wrap}
+    .ft-in img{height:38px;width:auto;opacity:.9}
+    .ov{position:fixed;inset:0;background:rgba(7,18,33,.62);display:none;align-items:center;justify-content:center;padding:20px;z-index:60;backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+    .ov.open{display:flex;animation:seofade .15s ease}
+    @keyframes seofade{from{opacity:0}to{opacity:1}}
+    .modal{background:#fff;border-radius:24px;max-width:470px;width:100%;padding:36px 32px 30px;text-align:center;box-shadow:0 34px 90px rgba(0,0,0,.45);position:relative;animation:seopop .2s ease}
+    @keyframes seopop{from{transform:translateY(10px) scale(.97);opacity:0}to{transform:none;opacity:1}}
+    .modal .ic{width:68px;height:68px;border-radius:50%;background:linear-gradient(135deg,#fff1d2,#ffdf9d);color:var(--gold1);display:flex;align-items:center;justify-content:center;margin:0 auto 18px;font-size:32px}
+    .modal h3{margin:0 0 10px;font-size:23px;color:var(--navy)}
+    .modal p{color:#52617a;font-size:15px;margin:0 0 26px}
+    .modal .row{display:flex;flex-direction:column;gap:11px}
+    .btn-vip{background:linear-gradient(92deg,var(--gold1),var(--gold2));color:#241803;font-weight:800;padding:15px;border-radius:13px;border:0;cursor:pointer;font-size:15px;text-decoration:none;display:block;box-shadow:0 12px 26px rgba(243,197,78,.32)}
+    .btn-vip:hover{text-decoration:none;filter:brightness(1.04)}
+    .btn-free{background:#fff;color:var(--teal);font-weight:700;padding:14px;border-radius:13px;border:1px solid #cfe6eb;cursor:pointer;font-size:15px;text-decoration:none;display:block}
+    .btn-free:hover{text-decoration:none;background:#f5fcfd}
+    .modal .x{position:absolute;top:16px;right:18px;color:#9aa7b6;cursor:pointer;font-size:25px;line-height:1;border:0;background:none}
+    @media(max-width:680px){.brand img{height:50px}.nav{padding:14px 18px}.nav-cta{padding:9px 14px}.hero-in{padding:24px 18px 80px}.wrap{padding:28px 18px 8px}.cta{width:100%;justify-content:center}.cta-row{flex-direction:column;align-items:stretch}}
+"""
+
+# VIP-only modal markup + behaviour. Placeholders are swapped via str.replace so
+# the inline JS braces never collide with f-string/format interpolation.
+_SEO_VIP_MODAL = """
+  <div class="ov" id="vipov" onclick="if(event.target===this)closeVip()">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="vipt">
+      <button class="x" type="button" onclick="closeVip()" aria-label="Close">&times;</button>
+      <div class="ic"><svg width="34" height="34" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14a1 1 0 0 0 1-1.21L18.2 9l-4 3.1L12 5.6 9.8 12.1l-4-3.1L4 18.79A1 1 0 0 0 5 20z"/></svg></div>
+      <h3 id="vipt">This test is for VIP accounts</h3>
+      <p>Sorry, this practice test is currently available to VIP accounts only. Try our free tests now &mdash; or, if you're preparing for the exam and want our premium forecast sets, subscribe to VIP.</p>
+      <div class="row">
+        <a class="btn-vip" href="__VIP_LINK__">Subscribe to VIP</a>
+        <a class="btn-free" href="__APP_LINK__">Try free tests</a>
+      </div>
+    </div>
+  </div>
+  <script>
+    function showVip(){document.getElementById('vipov').classList.add('open')}
+    function closeVip(){document.getElementById('vipov').classList.remove('open')}
+    document.addEventListener('keydown',function(e){if(e.key==='Escape')closeVip()});
+  </script>
+"""
+
+
+def _seo_cta_block(is_free, app_link, vip_link, label):
+    """Return (cta_html, modal_html). Free exams link straight to the app; VIP
+    exams turn the CTA into a button that opens the VIP modal."""
+    if is_free:
+        cta = f'<a class="cta" href="{html_lib.escape(app_link)}">{html_lib.escape(label)} &rarr;</a>'
+        return cta, ""
+    crown = ('<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
+             '<path d="M5 20h14a1 1 0 0 0 1-1.21L18.2 9l-4 3.1L12 5.6 9.8 12.1l-4-3.1L4 18.79A1 1 0 0 0 5 20z"/></svg>')
+    cta = (
+        f'<button class="cta" type="button" onclick="showVip()">{html_lib.escape(label)} &rarr;</button>'
+        f'\n  <span class="lock">{crown} VIP accounts only</span>'
+    )
+    modal = (_SEO_VIP_MODAL
+             .replace("__VIP_LINK__", html_lib.escape(vip_link))
+             .replace("__APP_LINK__", html_lib.escape(app_link)))
+    return cta, modal
+
+
+def _seo_hero(app_link, crumb_inner, badge_text, h1_html, lead_html, chips_html, cta_html):
+    """Full immersive dark hero: brand nav, breadcrumb, badge, title, lead,
+    feature chips, CTA, and an SVG wave dividing into the light content below.
+    Page-specific HTML is passed in pre-built/escaped."""
+    logo = f"{SEO_APP_URL}/img/logo-ielts.png"
+    return (
+        '  <header class="hero">\n'
+        '    <nav class="nav">'
+        f'<a class="brand" href="{SEO_APP_URL}">'
+        f'<img src="{logo}" alt="ieltscomputertest.com logo" width="62" height="62">'
+        '<span class="brand-tx">IELTS<b>Computer</b>Test</span></a>'
+        f'<a class="nav-cta" href="{html_lib.escape(app_link)}">Practice now &rarr;</a>'
+        '</nav>\n'
+        '    <div class="hero-in">\n'
+        f'      <nav class="crumb">{crumb_inner}</nav>\n'
+        f'      <span class="badge">{badge_text}</span>\n'
+        f'      <h1>{h1_html}</h1>\n'
+        f'      <p class="lead">{lead_html}</p>\n'
+        f'{chips_html}'
+        f'      <div class="cta-row">{cta_html}</div>\n'
+        '    </div>\n'
+        '    <svg class="wave" viewBox="0 0 1440 72" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">'
+        '<path fill="#eef3f8" d="M0,34 C300,76 560,6 820,28 C1040,46 1240,80 1440,42 L1440,72 L0,72 Z"></path></svg>\n'
+        '  </header>'
+    )
+
+
+def _seo_footer():
+    logo = f"{SEO_APP_URL}/img/logo-ielts.png"
+    return (
+        '  <footer class="ft"><div class="ft-in">'
+        f'<img src="{logo}" alt="ieltscomputertest.com" width="38" height="38">'
+        '<span>&copy; ieltscomputertest.com &mdash; IELTS computer-based practice on a 100% real exam interface</span>'
+        '</div></footer>'
+    )
+
+
 @router.get("/sitemap-exams.xml", include_in_schema=False)
 async def sitemap_exams(request: Request, db: Session = Depends(get_db)):
     base = _seo_base(request)
@@ -401,14 +552,15 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
             break
 
     parts_html = "\n".join(
-        f'      <li><span class="part">Part {n}</span> {html_lib.escape(t)}</li>'
+        f'        <li><span class="pi"><span class="pn">Part {n}</span> {html_lib.escape(t)}</span></li>'
         for n, t in parts
     )
     others_html = "\n".join(
-        f'      <li><a href="{base}/public/t/{skill}/{e.exam_id}/{s}">'
+        f'        <li><a href="{base}/public/t/{skill}/{e.exam_id}/{s}">'
         f'{html_lib.escape(_seo_clean(e.title))}</a></li>'
         for e, s in others
     )
+    is_free = _seo_exam_is_free(db, exam_id)
     json_ld = json.dumps({
         "@context": "https://schema.org",
         "@type": "LearningResource",
@@ -419,7 +571,7 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
         "inLanguage": "en",
         "about": f"IELTS {skill_label}",
         "teaches": part_titles,
-        "isAccessibleForFree": True,
+        "isAccessibleForFree": is_free,
         "provider": {
             "@type": "EducationalOrganization",
             "name": "ieltscomputertest.com",
@@ -428,6 +580,20 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
     }, ensure_ascii=False)
 
     app_link = f"{SEO_APP_URL}/{skill}_list"
+    vip_link = f"{SEO_APP_URL}/vip-packages"
+    cta_html, modal_html = _seo_cta_block(
+        is_free, app_link, vip_link, "Start practicing on ieltscomputertest.com")
+    crumb_inner = (
+        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a>'
+        f' / {html_lib.escape(exam_title)}'
+    )
+    lead_html = (
+        f'Practice <strong>{html_lib.escape(exam_title)}</strong> for the IELTS '
+        f'{skill_label} section on a 100% real computer-based exam interface.'
+    )
+    hero = _seo_hero(app_link, crumb_inner, f"IELTS {skill_label} &middot; Computer Test",
+                     html_lib.escape(exam_title), lead_html, "", cta_html)
+    footer = _seo_footer()
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -442,31 +608,24 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
   <meta property="og:description" content="{html_lib.escape(description)}">
   <meta property="og:url" content="{html_lib.escape(canonical)}">
   <meta property="og:site_name" content="ieltscomputertest.com">
+  <meta property="og:image" content="{SEO_APP_URL}/img/logo-ielts.png">
   <script type="application/ld+json">{json_ld}</script>
-  <style>
-    body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0e233a;max-width:760px;margin:0 auto;padding:24px;line-height:1.6}}
-    a{{color:#0096b1}}
-    .crumb{{font-size:14px;color:#6b7280;margin-bottom:8px}}
-    h1{{font-size:28px;margin:.2em 0}}
-    .part{{display:inline-block;background:#e8f7ed;color:#1f7a44;font-weight:600;font-size:12px;padding:2px 8px;border-radius:999px;margin-right:8px}}
-    ul{{list-style:none;padding:0}}
-    li{{padding:10px 0;border-bottom:1px solid #eef1f4}}
-    .cta{{display:inline-block;margin:20px 0;background:linear-gradient(90deg,#c98825,#e4b231);color:#fff;font-weight:700;padding:14px 28px;border-radius:12px;text-decoration:none}}
-    .more a{{display:block}}
-  </style>
+  <style>{_SEO_CSS}</style>
 </head>
 <body>
-  <nav class="crumb"><a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a> / {html_lib.escape(exam_title)}</nav>
-  <h1>{html_lib.escape(exam_title)} — IELTS {skill_label} Computer Test</h1>
-  <p>Practice <strong>{html_lib.escape(exam_title)}</strong> for the IELTS {skill_label} section on a 100% real computer-based exam interface. This test includes the following parts:</p>
-  <ul>
+{hero}
+  <main class="wrap">
+    <h2 class="sec">Parts in this test</h2>
+    <ul class="parts">
 {parts_html}
-  </ul>
-  <a class="cta" href="{app_link}">Start practicing on ieltscomputertest.com →</a>
-  <h2>More IELTS {skill_label} tests</h2>
-  <ul class="more">
+    </ul>
+    <h2 class="sec">More IELTS {skill_label} tests</h2>
+    <ul class="parts">
 {others_html}
-  </ul>
+    </ul>
+  </main>
+{footer}
+{modal_html}
 </body>
 </html>
 """
@@ -510,14 +669,17 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
         ExamSection.section_type == section_type
     ).order_by(ExamSection.order_number).all()
     siblings_html = "\n".join(
-        f'      <li><a href="{base}/public/p/{skill}/{s.section_id}/{_seo_slugify(s.part_title)}">'
-        f'Part {s.order_number} — {html_lib.escape(_seo_clean(s.part_title))}</a></li>'
+        f'        <li><a href="{base}/public/p/{skill}/{s.section_id}/{_seo_slugify(s.part_title)}">'
+        f'<span class="pn">Part {s.order_number}</span> {html_lib.escape(_seo_clean(s.part_title))}</a></li>'
         for s in siblings if _seo_clean(s.part_title) and s.section_id != section_id
     )
-    qtypes_html = (
-        "<p>Question types: " + ", ".join(html_lib.escape(q) for q in qtypes) + ".</p>"
+    chips_html = (
+        '      <div class="chips">'
+        + "".join(f'<span class="chip">{html_lib.escape(q)}</span>' for q in qtypes)
+        + "</div>\n"
         if qtypes else ""
     )
+    is_free = _seo_exam_is_free(db, sec.exam_id)
     json_ld = json.dumps({
         "@context": "https://schema.org",
         "@type": "LearningResource",
@@ -528,7 +690,7 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
         "inLanguage": "en",
         "about": f"IELTS {skill_label}",
         "isPartOf": exam_title,
-        "isAccessibleForFree": True,
+        "isAccessibleForFree": is_free,
         "provider": {
             "@type": "EducationalOrganization",
             "name": "ieltscomputertest.com",
@@ -536,7 +698,23 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
         },
     }, ensure_ascii=False)
     app_link = f"{SEO_APP_URL}/{skill}_list"
+    vip_link = f"{SEO_APP_URL}/vip-packages"
     exam_link = f"{base}/public/t/{skill}/{exam.exam_id}/{_seo_slugify(exam.title)}"
+    cta_html, modal_html = _seo_cta_block(
+        is_free, app_link, vip_link, "Start practicing on ieltscomputertest.com")
+    crumb_inner = (
+        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a>'
+        f' / <a href="{exam_link}">{html_lib.escape(exam_title)}</a> / Part {sec.order_number}'
+    )
+    lead_html = (
+        f'<strong>{html_lib.escape(part_title)}</strong> is Part {sec.order_number} of '
+        f'<a href="{exam_link}">{html_lib.escape(exam_title)}</a> &mdash; IELTS {skill_label} '
+        f'on the computer-based test. Practice it on a 100% real exam interface.'
+    )
+    hero = _seo_hero(app_link, crumb_inner,
+                     f"IELTS {skill_label} &middot; Part {sec.order_number}",
+                     html_lib.escape(part_title), lead_html, chips_html, cta_html)
+    footer = _seo_footer()
     page = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -551,26 +729,20 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
   <meta property="og:description" content="{html_lib.escape(description)}">
   <meta property="og:url" content="{html_lib.escape(canonical)}">
   <meta property="og:site_name" content="ieltscomputertest.com">
+  <meta property="og:image" content="{SEO_APP_URL}/img/logo-ielts.png">
   <script type="application/ld+json">{json_ld}</script>
-  <style>
-    body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#0e233a;max-width:760px;margin:0 auto;padding:24px;line-height:1.6}}
-    a{{color:#0096b1}}
-    .crumb{{font-size:14px;color:#6b7280;margin-bottom:8px}}
-    h1{{font-size:28px;margin:.2em 0}}
-    .cta{{display:inline-block;margin:20px 0;background:linear-gradient(90deg,#c98825,#e4b231);color:#fff;font-weight:700;padding:14px 28px;border-radius:12px;text-decoration:none}}
-    ul{{list-style:none;padding:0}} li{{padding:8px 0;border-bottom:1px solid #eef1f4}}
-  </style>
+  <style>{_SEO_CSS}</style>
 </head>
 <body>
-  <nav class="crumb"><a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a> / <a href="{exam_link}">{html_lib.escape(exam_title)}</a> / Part {sec.order_number}</nav>
-  <h1>{html_lib.escape(part_title)}</h1>
-  <p><strong>{html_lib.escape(part_title)}</strong> is Part {sec.order_number} of <a href="{exam_link}">{html_lib.escape(exam_title)}</a> — IELTS {skill_label} on the computer-based test. Practice it on a 100% real exam interface.</p>
-  {qtypes_html}
-  <a class="cta" href="{app_link}">Start practicing on ieltscomputertest.com →</a>
-  <h2>Other parts of {html_lib.escape(exam_title)}</h2>
-  <ul>
+{hero}
+  <main class="wrap">
+    <h2 class="sec">Other parts of {html_lib.escape(exam_title)}</h2>
+    <ul class="parts">
 {siblings_html}
-  </ul>
+    </ul>
+  </main>
+{footer}
+{modal_html}
 </body>
 </html>
 """
