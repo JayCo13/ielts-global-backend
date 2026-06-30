@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial, ExamAccessType
+from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 from typing import List
 
@@ -331,15 +331,36 @@ def _seo_not_found():
     )
 
 
-def _seo_exam_is_free(db, exam_id):
-    """An exam is "free" (no VIP required) iff it carries a 'no vip' access_type
-    — the exact signal check_exam_access() uses to admit a non-VIP customer
-    (routes/admin/auth.py). This is the authoritative gate; the frontend's
-    first-6 blur is only a display teaser and is intentionally not used here."""
-    rows = db.query(ExamAccessType.access_type).filter(
-        ExamAccessType.exam_id == exam_id
-    ).all()
-    return any(r[0] == 'no vip' for r in rows)
+_SEO_FREE_LIMIT = 6  # mirror testsPerPage / first-6 rule in Reading_Fe/Listening_Fe
+
+
+def _seo_sort_key(title):
+    """Replicate the student list's default alphabetical 'natural sort'
+    (Reading_Fe/Listening_Fe): split the title on digit runs and zero-pad each
+    number to 10 chars so "Test 9" sorts before "Test 10"."""
+    out = []
+    for item in re.split(r'([0-9]+)', title or ''):
+        out.append(item.rjust(10, '0') if (item == '' or item.isdigit()) else item)
+    return ''.join(out)
+
+
+def _seo_free_exam_ids(db, section_type):
+    """Exam ids a guest may open for free = the first N active exams for the
+    skill in the app's default alphabetical order. This mirrors the frontend's
+    "first 6 tests are free" rule (the gate guests actually experience)."""
+    exams = db.query(Exam).join(ExamSection).filter(
+        Exam.is_active == True,
+        ExamSection.section_type == section_type
+    ).distinct().all()
+    exams_sorted = sorted(exams, key=lambda e: _seo_sort_key(e.title or ''))
+    return {e.exam_id for e in exams_sorted[:_SEO_FREE_LIMIT]}
+
+
+def _seo_exam_is_free(db, exam_id, section_type):
+    """An exam is "free" iff it is among the first 6 in alphabetical order — the
+    same set a guest can open in the app (Reading_Fe/Listening_Fe), not the
+    ExamAccessType signal."""
+    return exam_id in _seo_free_exam_ids(db, section_type)
 
 
 # Shared stylesheet for the public SEO landing pages. Plain (non f-string) so the
@@ -560,7 +581,7 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
         f'{html_lib.escape(_seo_clean(e.title))}</a></li>'
         for e, s in others
     )
-    is_free = _seo_exam_is_free(db, exam_id)
+    is_free = _seo_exam_is_free(db, exam_id, section_type)
     json_ld = json.dumps({
         "@context": "https://schema.org",
         "@type": "LearningResource",
@@ -679,7 +700,7 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
         + "</div>\n"
         if qtypes else ""
     )
-    is_free = _seo_exam_is_free(db, sec.exam_id)
+    is_free = _seo_exam_is_free(db, sec.exam_id, section_type)
     json_ld = json.dumps({
         "@context": "https://schema.org",
         "@type": "LearningResource",
