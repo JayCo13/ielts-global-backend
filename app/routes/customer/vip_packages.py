@@ -202,6 +202,161 @@ async def create_checkout(
         )
 
 
+@router.post("/packages/{package_id}/purchase", response_model=dict)
+async def purchase_package(
+    package_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a PayOS payment link for a one-time VIP package purchase.
+    Returns a hosted checkout URL that the frontend redirects to.
+    """
+    import time
+    from app.utils.payos_service import create_payment_link
+
+    package = db.query(VIPPackage).filter(
+        VIPPackage.package_id == package_id,
+        VIPPackage.is_active == True
+    ).first()
+
+    if not package:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not available"
+        )
+
+    # Rate limiting: max 20 payment requests per user per 5 minutes
+    five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
+    recent_count = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.created_at >= five_min_ago,
+        PackageTransaction.status != "reject"
+    ).count()
+
+    if recent_count >= 20:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many payment requests. Please try again later."
+        )
+
+    # Cancel existing pending PayOS transactions for same user+package (may have expired on PayOS side)
+    existing_pending = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.package_id == package_id,
+        PackageTransaction.status == "pending",
+        PackageTransaction.payment_method == "payos",
+    ).all()
+
+    for old_txn in existing_pending:
+        old_txn.status = "reject"
+        old_txn.admin_note = "Auto-cancelled: new transaction created"
+        if old_txn.subscription_id:
+            old_sub = db.query(VIPSubscription).filter(
+                VIPSubscription.subscription_id == old_txn.subscription_id
+            ).first()
+            if old_sub and old_sub.payment_status == "pending":
+                old_sub.payment_status = "reject"
+    if existing_pending:
+        db.commit()
+
+    # Subscription stacking: new access starts when the current active one ends
+    if package.package_type == "single_skill":
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == current_user.user_id,
+            VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+            VIPSubscription.payment_status == "completed",
+            ((VIPPackage.package_type == "single_skill") & (VIPPackage.skill_type == package.skill_type)) |
+            (VIPPackage.package_type == "all_skills")
+        ).order_by(VIPSubscription.end_date.desc()).first()
+    else:
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == current_user.user_id,
+            VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+            VIPSubscription.payment_status == "completed",
+            VIPPackage.package_type == "all_skills"
+        ).order_by(VIPSubscription.end_date.desc()).first()
+
+    if active_subscription:
+        start_date = active_subscription.end_date
+    else:
+        start_date = get_vietnam_time().replace(tzinfo=None)
+
+    end_date = start_date + timedelta(days=package.duration_months * 30)
+
+    # Create subscription (pending)
+    subscription = VIPSubscription(
+        user_id=current_user.user_id,
+        package_id=package_id,
+        start_date=start_date,
+        end_date=end_date,
+        payment_status="pending",
+        created_at=get_vietnam_time().replace(tzinfo=None)
+    )
+    db.add(subscription)
+    db.commit()
+    db.refresh(subscription)
+
+    # Generate unique order code for PayOS (must be a unique positive integer)
+    order_code = int(f"{int(time.time())}{subscription.subscription_id}")
+
+    # Create transaction record
+    transaction = PackageTransaction(
+        user_id=current_user.user_id,
+        package_id=package_id,
+        subscription_id=subscription.subscription_id,
+        amount=package.price,
+        payment_method="payos",
+        status="pending",
+        payos_order_code=order_code,
+        created_at=get_vietnam_time().replace(tzinfo=None)
+    )
+    db.add(transaction)
+    db.commit()
+    db.refresh(transaction)
+
+    # Create PayOS payment link
+    try:
+        return_url = os.getenv("PAYOS_RETURN_URL", "https://ieltscomputertest.com/payment-processing")
+        cancel_url = os.getenv("PAYOS_CANCEL_URL", "https://ieltscomputertest.com/payment-cancel")
+
+        # PayOS description max 25 chars - strip "(...)" suffix
+        clean_name = package.name.split("(")[0].strip()
+        description = clean_name[:25]
+
+        payos_response = create_payment_link(
+            order_code=order_code,
+            amount=int(package.price),
+            description=description,
+            return_url=return_url,
+            cancel_url=cancel_url,
+        )
+
+        checkout_url = payos_response.checkout_url
+
+        # Save checkout URL for reference
+        transaction.payos_checkout_url = checkout_url
+        db.commit()
+
+        return {
+            "message": "Payment link created successfully",
+            "transaction_id": transaction.transaction_id,
+            "checkoutUrl": checkout_url,
+            "status": "pending"
+        }
+    except Exception as e:
+        logger.error(f"PayOS payment link creation failed: {e}", exc_info=True)
+        # If PayOS fails, clean up the pending records
+        db.delete(transaction)
+        db.delete(subscription)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create payment link. Please try again later."
+        )
+
+
 @router.post("/subscription/cancel", response_model=dict)
 async def cancel_subscription(
     current_user: User = Depends(get_current_student),

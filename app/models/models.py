@@ -151,6 +151,8 @@ class PackageTransaction(Base):
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
     admin_note = Column(Text, nullable=True)
     ls_order_id = Column(String(100), nullable=True, index=True)  # Lemon Squeezy order ID
+    payos_order_code = Column(BigInteger, nullable=True, unique=True, index=True)  # PayOS order code
+    payos_checkout_url = Column(Text, nullable=True)  # PayOS hosted checkout URL
     user = relationship("User")
     package = relationship("VIPPackage")
     subscription = relationship("VIPSubscription")
