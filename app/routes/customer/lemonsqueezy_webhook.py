@@ -22,9 +22,15 @@ from app.utils.datetime_utils import get_vietnam_time
 from datetime import timedelta
 import json
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _webhook_disabled() -> bool:
+    """LS store was suspended (2026-07): set LEMONSQUEEZY_WEBHOOK_DISABLED=true to ignore all LS events."""
+    return os.getenv("LEMONSQUEEZY_WEBHOOK_DISABLED", "").strip().lower() in ("1", "true", "yes")
 
 
 def _extract_custom_data(event_data: dict) -> dict:
@@ -58,6 +64,11 @@ async def lemonsqueezy_webhook(request: Request, db: Session = Depends(get_db)):
         if not verify_webhook_signature(raw_body, signature):
             logger.warning("Lemon Squeezy webhook signature verification failed")
             raise HTTPException(status_code=400, detail="Invalid webhook signature")
+
+        # Step 1b: Kill switch — acknowledge with 200 (so LS stops retrying) but change nothing
+        if _webhook_disabled():
+            logger.info(f"Lemon Squeezy webhook ignored (LEMONSQUEEZY_WEBHOOK_DISABLED): {event_name}")
+            return {"status": "ignored"}
 
         # Parse the webhook event
         event = json.loads(raw_body)
