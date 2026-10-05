@@ -77,6 +77,7 @@ async def get_user_notification(
 # GET endpoints for UpdateKey
 @router.get("/update-keys", response_model=List[UpdateKeyResponse])
 async def get_update_keys(
+    current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
     """Get all active update keys"""
@@ -89,6 +90,7 @@ async def get_update_keys(
 @router.get("/update-key/{key_id}", response_model=UpdateKeyResponse)
 async def get_update_key(
     key_id: int,
+    current_admin = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
     """Get a specific update key by ID"""

@@ -4,6 +4,8 @@ from typing import Optional
 from app.database import get_db
 from app.models.models import ExamAccessType, User, ExamResult, Exam, ExamSection, Question, QuestionOption, ReadingPassage, ListeningMedia, WritingTask, StudentAnswer, WritingAnswer, ListeningAnswer, SpeakingMaterial
 from app.routes.admin.auth import get_current_student, check_exam_access
+from app.utils.exam_access import require_exam_access
+from app.utils.upload_security import validate_image_bytes
 from typing import List, Dict
 from bs4 import BeautifulSoup
 from fastapi.responses import StreamingResponse
@@ -169,8 +171,30 @@ async def get_student_profile(
 async def stream_combined_audio(
     exam_id: int,
     request: Request,
+    token: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
+    # Authenticate via Authorization header OR ?token= (native <audio> streaming
+    # can't send headers), then enforce exam access — same gate as /audio-part.
+    from jose import jwt, JWTError
+    from app.routes.admin.auth import SECRET_KEY, ALGORITHM
+
+    auth_header = request.headers.get("Authorization", "")
+    jwt_token = auth_header[7:] if auth_header.startswith("Bearer ") else token
+    if not jwt_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    try:
+        payload = jwt.decode(jwt_token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    current_student = db.query(User).filter(User.username == username).first()
+    if current_student is None or current_student.role not in ["student", "customer"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    await require_exam_access(db, current_student, exam_id)
+
     # Disk cache: after first combine per exam, every subsequent request
     # (including Range / seek requests, of which the browser sends many)
     # skips the R2 downloads + ffmpeg combine and streams from disk directly.
@@ -468,12 +492,12 @@ async def update_student_profile(
         current_student.username = username
     
     if image:
-        file_extension = os.path.splitext(image.filename)[1]
+        content = await image.read()
+        file_extension = validate_image_bytes(content)  # magic-byte + size check
         unique_filename = f"{uuid4()}{file_extension}"
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
-        
+
         with open(file_path, "wb") as buffer:
-            content = await image.read()
             buffer.write(content)
         
         current_student.image_url = file_path
@@ -968,13 +992,8 @@ async def get_exam_audio_part(
             detail="Exam not found or not active"
         )
     
-    # Check if user has access to this exam
-    has_access = check_exam_access(db, exam_id, current_student)
-    if not has_access:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this exam"
-        )
+    # Check if user has access to this exam (past takers keep review access)
+    await require_exam_access(db, current_student, exam_id)
     
     # Get the specific audio file for this exam part
     listening_media = db.query(ListeningMedia)\
@@ -1205,6 +1224,10 @@ async def start_exam(
             detail="Exam not found or not active"
         )
 
+    # This endpoint returns the WHOLE exam (sections + questions + options);
+    # it previously had no access check at all. See app/utils/exam_access.py.
+    await require_exam_access(db, current_student, exam_id)
+
     sections = []
     exam_sections = db.query(ExamSection).filter(
         ExamSection.exam_id == exam_id
@@ -1241,7 +1264,6 @@ async def start_exam(
                 section_data["media"] = {
                     "media_id": media.media_id,
                     "audio_filename": media.audio_filename,
-                    "transcript": media.transcript.strip() if media.transcript else None,
                     "duration": media.duration
                 }
 
@@ -1776,13 +1798,8 @@ async def get_listening_part_descriptions(
             detail="This is not a listening exam"
         )
     
-    # Check if user has access to this exam
-    has_access = check_exam_access(db, exam_id, current_student)
-    if not has_access:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this exam"
-        )
+    # Check if user has access to this exam (past takers keep review access)
+    await require_exam_access(db, current_student, exam_id)
     
     # Initialize descriptions dictionary
     descriptions = {

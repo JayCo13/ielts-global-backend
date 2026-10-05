@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import Exam, ExamSection, Question, QuestionOption, ReadingPassage, QuestionGroup, ExamResult, StudentAnswer, ExamAccessType
 from app.routes.admin.auth import get_current_student
+from app.utils.exam_access import require_exam_access
 from typing import List, Dict
 from sqlalchemy.sql import func
 from datetime import datetime
@@ -216,6 +217,10 @@ async def get_reading_test(
     db: Session = Depends(get_db)
 ):
     """Get details of a specific reading test with caching"""
+    # Gate BEFORE the cache read: the cache is not per-user, so checking after
+    # it would still serve a cached copy to someone without access.
+    await require_exam_access(db, current_student, exam_id)
+
     # Try to get from cache first
     cache_key = get_reading_test_cache_key(exam_id)
     cached_result = await cache.get(cache_key)

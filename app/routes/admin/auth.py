@@ -18,6 +18,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from typing import Optional, List
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.vip_access import package_covers, SECTION_TO_SKILL
 from datetime import timedelta
 from urllib.parse import urlencode, quote_plus
 import hashlib
@@ -634,34 +635,22 @@ async def check_exam_access(user: User, exam_id: int, db: Session) -> bool:
     if exam_section.section_type == 'speaking':
         return True
     
-    # For customers, check VIP status and test limits
-    if user.role == "customer":
-        # Check test limit for non-VIP users
-        if not user.is_vip:
-            # Remove the recursive call that's causing the error
-            # For non-VIP users, we'll just check access types below
-            pass
-        else:
-            # Check if user has VIP access for this skill
-            active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
-                VIPSubscription.user_id == user.user_id,
-                VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
-                VIPSubscription.payment_status == "completed",
-                or_(
-                    VIPPackage.package_type == 'all_skills',
-                    and_(
-                        VIPPackage.package_type == 'single_skill',
-                        VIPPackage.skill_type == exam_section.section_type
-                    )
-                )
-            ).first()
-            
-            if not active_subscription:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"You need a VIP subscription for {exam_section.section_type} tests"
-                )
-    
+    # For customers, determine VIP access per-skill (don't trust user.is_vip
+    # alone — it can be stale when a subscription expires). The access-type
+    # check below is the single source of truth for allow/deny.
+    # section_type must be mapped to a VIP skill_type first — a Writing section is
+    # stored as 'essay', so comparing it to skill_type directly never matches.
+    skill = SECTION_TO_SKILL.get(exam_section.section_type)
+    has_active_skill_subscription = False
+    if user.role == "customer" and user.is_vip and skill:
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == user.user_id,
+            VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+            VIPSubscription.payment_status == "completed",
+            package_covers(skill)
+        ).first()
+        has_active_skill_subscription = active_subscription is not None
+
     # Get exam access types
     exam_access_types = db.query(ExamAccessType)\
         .filter(ExamAccessType.exam_id == exam_id)\
@@ -672,7 +661,10 @@ async def check_exam_access(user: User, exam_id: int, db: Session) -> bool:
     if user.role == 'student':
         allowed_types = ['student']
     elif user.role == 'customer':
-        if user.is_vip:
+        # Expired-VIP and non-VIP customers both get the same 'no vip' allowance.
+        # VIP allowance only when the subscription is currently active and
+        # covers this skill.
+        if has_active_skill_subscription:
             allowed_types = ['no vip', 'vip']
         else:
             allowed_types = ['no vip']
@@ -773,13 +765,17 @@ async def admin_login(
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.username == form_data.username).first()
-    
+    # Uniform error + constant-time compare so a wrong username and a wrong
+    # password are indistinguishable (no account-enumeration oracle).
+    invalid_credentials = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Username does not exist",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        pwd_context.dummy_verify()  # equalize timing when the user doesn't exist
+        raise invalid_credentials
     
     # Check if user is an admin
     if user.role != 'admin':
@@ -790,11 +786,7 @@ async def admin_login(
         )
     
     if not pwd_context.verify(form_data.password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise invalid_credentials
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -1139,13 +1131,17 @@ async def admin_login(
     db: Session = Depends(get_db)
 ):
     user = db.query(User).filter(User.username == form_data.username).first()
-    
+    # Uniform error + constant-time compare so a wrong username and a wrong
+    # password are indistinguishable (no account-enumeration oracle).
+    invalid_credentials = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Incorrect username or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Username does not exist",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        pwd_context.dummy_verify()  # equalize timing when the user doesn't exist
+        raise invalid_credentials
     
     # Block specific email address
     if user.email == os.getenv("BLOCKED_EMAIL", ""):
@@ -1156,11 +1152,7 @@ async def admin_login(
         )
     
     if not pwd_context.verify(form_data.password, user.password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise invalid_credentials
 
     # Get device information
     user_agent = request.headers.get("user-agent", "") if request else ""

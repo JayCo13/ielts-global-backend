@@ -17,6 +17,98 @@ from app.utils.datetime_utils import get_vietnam_time
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 
 router = APIRouter()
+def upsert_listening_questions(db: Session, section_id: int, payloads: List[Dict]) -> int:
+    """Write a listening part's questions without throwing away question_id.
+
+    Ported from the Vietnam tree. The part-update endpoints used to delete every
+    Question row and insert fresh ones. listening_answers.question_id is a FK onto
+    those rows, so every save silently orphaned each past attempt on that part:
+    review screens went blank for those students. Reusing the rows keeps the link.
+
+    Rows are matched by position, but only across the leading run where the
+    question_id the admin page round-trips still lines up with what is stored.
+    The first divergence means a question was inserted, removed or reordered, and
+    from there positions no longer identify the same question — reusing them would
+    silently re-point old answers at the wrong question, so the tail is recreated
+    exactly as before. A payload carrying no question_id reuses nothing.
+
+    Reading rows must not go through here (ordering there is question_number).
+
+    Each payload entry holds Question column values plus an optional "options"
+    list; "question_id" only selects the row to reuse and is never written.
+    Returns how many rows were reused.
+    """
+    existing = (
+        db.query(Question)
+        .filter(Question.section_id == section_id, Question.question_type != 'main_text')
+        .order_by(Question.question_id)
+        .all()
+    )
+
+    reused = 0
+    for i, data in enumerate(payloads):
+        if i >= len(existing):
+            break
+        qid = data.get('question_id')
+        if not qid or qid != existing[i].question_id:
+            break
+        reused = i + 1
+
+    # Everything past the reusable run goes, same as the old delete-and-recreate.
+    for question in existing[reused:]:
+        db.query(QuestionOption).filter(
+            QuestionOption.question_id == question.question_id
+        ).delete()
+        db.delete(question)
+    db.flush()
+
+    for i, data in enumerate(payloads):
+        options = data.get('options')
+        fields = {k: v for k, v in data.items() if k not in ('question_id', 'options')}
+        if i < reused:
+            question = existing[i]
+            for key, value in fields.items():
+                setattr(question, key, value)
+        else:
+            question = Question(section_id=section_id, **fields)
+        db.add(question)
+        db.flush()
+
+        # Options carry no student data, so they are always replaced wholesale.
+        db.query(QuestionOption).filter(
+            QuestionOption.question_id == question.question_id
+        ).delete()
+        if options:
+            if not isinstance(options, list):
+                raise HTTPException(status_code=400, detail="Options must be an array")
+            for opt_data in options:
+                if not all(field in opt_data for field in ['option_text', 'is_correct']):
+                    raise HTTPException(status_code=400, detail="Missing required fields in option data")
+                db.add(QuestionOption(
+                    question_id=question.question_id,
+                    option_text=opt_data['option_text'].strip(),
+                    is_correct=bool(opt_data['is_correct'])
+                ))
+
+    return reused
+
+
+def upsert_main_text_question(db: Session, section_id: int, part_number: int, transcript):
+    """Reuse the part's main_text row so its question_id — referenced by every
+    other question's additional_data['main_text_id'] — stays stable."""
+    question = db.query(Question).filter(
+        Question.section_id == section_id,
+        Question.question_type == 'main_text'
+    ).first()
+    if question is None:
+        question = Question(section_id=section_id, question_type='main_text')
+    question.question_text = transcript
+    question.additional_data = {'part_number': part_number}
+    db.add(question)
+    db.flush()
+    return question
+
+
 class ExamDescriptionUpdate(BaseModel):
     description: str
 
@@ -1033,18 +1125,6 @@ async def update_listening_part_without_audio(
         main_question.question_text = transcript
         db.add(main_question)
     
-    # Delete existing questions (except main text) and their options
-    existing_questions = db.query(Question).filter(
-        Question.section_id == section.section_id,
-        Question.question_type != 'main_text'
-    ).all()
-    
-    for q in existing_questions:
-        db.query(QuestionOption).filter(
-            QuestionOption.question_id == q.question_id
-        ).delete()
-        db.delete(q)
-    
     # Parse transcript to extract question contexts if transcript is provided
     question_contexts = []
     if transcript:
@@ -1083,75 +1163,41 @@ async def update_listening_part_without_audio(
     
     # If no transcript provided or no contexts extracted, use existing questions data directly
     if not question_contexts:
-        for q_data in questions_data:
-            question = Question(
-                section_id=section.section_id,
-                question_type=q_data['question_type'],
-                question_text=q_data.get('question_text', ''),
-                correct_answer=q_data['correct_answer'],
-                explanation=q_data.get('explanation', ''),
-                locate=q_data.get('locate', ''),
-                marks=int(q_data['marks']),
-                additional_data={
-                    'main_text_id': main_question.question_id if main_question else None,
-                    'full_context': transcript if transcript else media.transcript,
-                }
-            )
-            db.add(question)
-            db.flush()
-            
-            # Handle options if present
-            if q_data.get('options'):
-                if not isinstance(q_data['options'], list):
-                    raise HTTPException(status_code=400, detail="Options must be an array")
-                    
-                for opt_data in q_data['options']:
-                    if not all(field in opt_data for field in ['option_text', 'is_correct']):
-                        raise HTTPException(status_code=400, detail="Missing required fields in option data")
-                        
-                    option = QuestionOption(
-                        question_id=question.question_id,
-                        option_text=opt_data['option_text'].strip(),
-                        is_correct=bool(opt_data['is_correct'])
-                    )
-                    db.add(option)
+        payloads = [{
+            'question_id': q_data.get('question_id'),
+            'question_type': q_data['question_type'],
+            'question_text': q_data.get('question_text', ''),
+            'correct_answer': q_data['correct_answer'],
+            'explanation': q_data.get('explanation', ''),
+            'locate': q_data.get('locate', ''),
+            'marks': int(q_data['marks']),
+            'additional_data': {
+                'main_text_id': main_question.question_id if main_question else None,
+                'full_context': transcript if transcript else media.transcript,
+            },
+            'options': q_data.get('options'),
+        } for q_data in questions_data]
     else:
-        # Process questions with their contexts
-        for q_data, context_data in zip(questions_data, question_contexts):
-            question = Question(
-                section_id=section.section_id,
-                question_type=q_data['question_type'],
-                question_text=context_data['context'],
-                correct_answer=q_data['correct_answer'],
-                explanation=q_data.get('explanation', ''),
-                locate=q_data.get('locate', ''),
-                marks=int(q_data['marks']),
-                additional_data={
-                    'question_number': context_data['number'],
-                    'main_text_id': main_question.question_id if main_question else None,
-                    'full_context': transcript if transcript else media.transcript,
-                    'required_choices': context_data.get('required_choices'),
-                }
-            )
-            db.add(question)
-            db.flush()
-            
-            # Handle options if present
-            if q_data.get('options'):
-                if not isinstance(q_data['options'], list):
-                    raise HTTPException(status_code=400, detail="Options must be an array")
-                    
-                for opt_data in q_data['options']:
-                    if not all(field in opt_data for field in ['option_text', 'is_correct']):
-                        raise HTTPException(status_code=400, detail="Missing required fields in option data")
-                        
-                    option = QuestionOption(
-                        question_id=question.question_id,
-                        option_text=opt_data['option_text'].strip(),
-                        is_correct=bool(opt_data['is_correct'])
-                    )
-                    db.add(option)
-    
+        # Pair each question with the transcript context it was extracted from.
+        payloads = [{
+            'question_id': q_data.get('question_id'),
+            'question_type': q_data['question_type'],
+            'question_text': context_data['context'],
+            'correct_answer': q_data['correct_answer'],
+            'explanation': q_data.get('explanation', ''),
+            'locate': q_data.get('locate', ''),
+            'marks': int(q_data['marks']),
+            'additional_data': {
+                'question_number': context_data['number'],
+                'main_text_id': main_question.question_id if main_question else None,
+                'full_context': transcript if transcript else media.transcript,
+                'required_choices': context_data.get('required_choices'),
+            },
+            'options': q_data.get('options'),
+        } for q_data, context_data in zip(questions_data, question_contexts)]
+
+    upsert_listening_questions(db, section.section_id, payloads)
+
     db.commit()
     
     return {
@@ -1196,13 +1242,9 @@ async def update_listening_part_with_audio(
     audio_content = await audio_file.read()
     audio_filename = audio_file.filename
 
-    # Delete existing media and questions
+    # Replace the media row; questions are upserted below so past answers keep
+    # their question_id (see upsert_listening_questions).
     db.query(ListeningMedia).filter(ListeningMedia.section_id == section.section_id).delete()
-    existing_questions = db.query(Question).filter(Question.section_id == section.section_id).all()
-    for q in existing_questions:
-        db.query(QuestionOption).filter(QuestionOption.question_id == q.question_id).delete()
-
-    db.query(Question).filter(Question.section_id == section.section_id).delete()
 
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
@@ -1257,51 +1299,27 @@ async def update_listening_part_with_audio(
     db.add(listening_media)
     db.flush()
 
-    # Create main text question for the transcript
-    main_question = Question(
-        section_id=section.section_id,
-        question_type='main_text',
-        question_text=transcript,
-        additional_data={'part_number': part_number}
-    )
-    db.add(main_question)
-    db.flush()
+    # Create (or reuse) the main text question for the transcript
+    main_question = upsert_main_text_question(db, section.section_id, part_number, transcript)
 
     # Process questions with their contexts
-    for q_data, context_data in zip(questions_data, question_contexts):
-        question = Question(
-            section_id=section.section_id,
-            question_type=q_data['question_type'],
-            question_text=context_data['context'],
-            correct_answer=q_data['correct_answer'],
-            explanation=q_data.get('explanation', ''),
-            locate=q_data.get('locate', ''),
-            marks=int(q_data['marks']),
-            additional_data={
-                'question_number': context_data['number'],
-                'main_text_id': main_question.question_id,
-                'full_context': transcript,
-                'required_choices': context_data.get('required_choices'),
-            }
-        )
-        db.add(question)
-        db.flush()
-
-        # Handle options if present
-        if q_data.get('options'):
-            if not isinstance(q_data['options'], list):
-                raise HTTPException(status_code=400, detail="Options must be an array")
-                
-            for opt_data in q_data['options']:
-                if not all(field in opt_data for field in ['option_text', 'is_correct']):
-                    raise HTTPException(status_code=400, detail="Missing required fields in option data")
-                    
-                option = QuestionOption(
-                    question_id=question.question_id,
-                    option_text=opt_data['option_text'].strip(),
-                    is_correct=bool(opt_data['is_correct'])
-                )
-                db.add(option)
+    payloads = [{
+        'question_id': q_data.get('question_id'),
+        'question_type': q_data['question_type'],
+        'question_text': context_data['context'],
+        'correct_answer': q_data['correct_answer'],
+        'explanation': q_data.get('explanation', ''),
+        'locate': q_data.get('locate', ''),
+        'marks': int(q_data['marks']),
+        'additional_data': {
+            'question_number': context_data['number'],
+            'main_text_id': main_question.question_id,
+            'full_context': transcript,
+            'required_choices': context_data.get('required_choices'),
+        },
+        'options': q_data.get('options'),
+    } for q_data, context_data in zip(questions_data, question_contexts)]
+    upsert_listening_questions(db, section.section_id, payloads)
 
     db.commit()
 
@@ -1356,12 +1374,9 @@ async def update_listening_part(
     audio_content = await audio_file.read()
     audio_filename = audio_file.filename
 
-    # Delete existing media and questions
+    # Replace the media row; questions are upserted below so past answers keep
+    # their question_id (see upsert_listening_questions).
     db.query(ListeningMedia).filter(ListeningMedia.section_id == section.section_id).delete()
-    existing_questions = db.query(Question).filter(Question.section_id == section.section_id).all()
-    for q in existing_questions:
-        db.query(QuestionOption).filter(QuestionOption.question_id == q.question_id).delete()
-    db.query(Question).filter(Question.section_id == section.section_id).delete()
 
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
@@ -1420,51 +1435,27 @@ async def update_listening_part(
     db.add(listening_media)
     db.flush()
 
-    # Create main text question for the transcript
-    main_question = Question(
-        section_id=section.section_id,
-        question_type='main_text',
-        question_text=transcript,
-        additional_data={'part_number': part_number}
-    )
-    db.add(main_question)
-    db.flush()
+    # Create (or reuse) the main text question for the transcript
+    main_question = upsert_main_text_question(db, section.section_id, part_number, transcript)
 
     # Process questions with their contexts
-    for q_data, context_data in zip(questions_data, question_contexts):
-        question = Question(
-            section_id=section.section_id,
-            question_type=q_data['question_type'],  # Use the type from frontend
-            question_text=context_data['context'],
-            correct_answer=q_data['correct_answer'],
-            explanation=q_data.get('explanation', ''),
-            locate=q_data.get('locate', ''),
-            marks=int(q_data['marks']),
-            additional_data={
-                'question_number': context_data['number'],
-                'main_text_id': main_question.question_id,
-                'full_context': transcript,
-                'required_choices': context_data.get('required_choices'),
-            }
-        )
-        db.add(question)
-        db.flush()
-
-        # Handle options if present
-        if q_data.get('options'):
-            if not isinstance(q_data['options'], list):
-                raise HTTPException(status_code=400, detail="Options must be an array")
-                
-            for opt_data in q_data['options']:
-                if not all(field in opt_data for field in ['option_text', 'is_correct']):
-                    raise HTTPException(status_code=400, detail="Missing required fields in option data")
-                    
-                option = QuestionOption(
-                    question_id=question.question_id,
-                    option_text=opt_data['option_text'].strip(),
-                    is_correct=bool(opt_data['is_correct'])
-                )
-                db.add(option)
+    payloads = [{
+        'question_id': q_data.get('question_id'),
+        'question_type': q_data['question_type'],
+        'question_text': context_data['context'],
+        'correct_answer': q_data['correct_answer'],
+        'explanation': q_data.get('explanation', ''),
+        'locate': q_data.get('locate', ''),
+        'marks': int(q_data['marks']),
+        'additional_data': {
+            'question_number': context_data['number'],
+            'main_text_id': main_question.question_id,
+            'full_context': transcript,
+            'required_choices': context_data.get('required_choices'),
+        },
+        'options': q_data.get('options'),
+    } for q_data, context_data in zip(questions_data, question_contexts)]
+    upsert_listening_questions(db, section.section_id, payloads)
 
     # Check if all parts are completed
     completed_parts = db.query(ListeningMedia).join(ExamSection).filter(
@@ -1477,7 +1468,15 @@ async def update_listening_part(
         db.add(exam)
 
     db.commit()
-    
+
+    # Invalidate the combined-audio disk cache for this exam (audio part replaced).
+    cached_combined = os.path.join("static", "combined_audio", f"exam_{exam_id}.mp3")
+    if os.path.exists(cached_combined):
+        try:
+            os.unlink(cached_combined)
+        except Exception:
+            pass
+
     return {
         "message": f"Part {part_number} updated successfully",
         "section_id": section.section_id,
