@@ -16,6 +16,8 @@ from .student.multiple_actions import router as student_multiple_actions_router
 from .student.vocabulary_routes import router as vocabulary_router
 from .student.dictation_routes import router as student_dictation_router
 from .student.translate_routes import router as student_translate_router
+from .student.error_report_routes import router as error_report_router
+from .admin.error_report_admin import router as error_report_admin_router
 from .public_seo import router as public_seo_router
 from .admin.marketing import router as admin_marketing_router
 
@@ -40,4 +42,6 @@ router.include_router(auth_router, tags=["auth"])
 router.include_router(vocabulary_router, prefix="/student", tags=["vocabulary"])
 router.include_router(student_dictation_router, prefix="/student", tags=["student-dictation"])
 router.include_router(student_translate_router, prefix="/student", tags=["student-translate"])
+router.include_router(error_report_router, prefix="/student", tags=["error-report"])
+router.include_router(error_report_admin_router, prefix="/admin", tags=["admin-error-report"])
 router.include_router(public_seo_router, prefix="/public", tags=["public-seo"])
