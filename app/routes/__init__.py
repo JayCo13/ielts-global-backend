@@ -33,6 +33,12 @@ from .student.overview_routes import router as student_overview_router
 from .student.leaderboard_routes import router as leaderboard_router
 from .admin.top_performers_admin import router as top_performers_admin_router
 from .admin.monthly_cup_admin import router as monthly_cup_admin_router
+from .student.speaking_test import router as speaking_test_router
+from .student.speaking_forecast import router as speaking_forecast_router
+from .student.speaking_analysis import router as speaking_analysis_router
+from .student.speaking_practice import router as speaking_practice_router
+from .student.speaking_lessons import router as speaking_lessons_router
+from .admin.speaking_admin import router as speaking_admin_router
 
 router = APIRouter()
 
@@ -84,3 +90,14 @@ router.include_router(student_overview_router, prefix="/student", tags=["student
 router.include_router(leaderboard_router, prefix="/student", tags=["leaderboard"])
 router.include_router(top_performers_admin_router, prefix="/admin", tags=["admin-top-performers"])
 router.include_router(monthly_cup_admin_router, prefix="/admin", tags=["admin-monthly-cup"])
+# VN Speaking port: AI Speaking test / forecast practice / analysis / pronunciation practice
+# and lessons (/student/speaking/*), and the admin question bank, TTS, pronunciation units
+# and job triggers (/admin/speaking/*). No cron on Koyeb — job triggers:
+# /admin/speaking/forecast/decay, /admin/speaking/jobs/prune-audio,
+# /admin/speaking/jobs/generate-pending, /admin/speaking/tts/generate.
+router.include_router(speaking_test_router, prefix="/student", tags=["speaking-test"])
+router.include_router(speaking_forecast_router, prefix="/student", tags=["speaking-forecast"])
+router.include_router(speaking_analysis_router, prefix="/student", tags=["speaking-analysis"])
+router.include_router(speaking_practice_router, prefix="/student", tags=["speaking-practice"])
+router.include_router(speaking_lessons_router, prefix="/student", tags=["speaking-lessons"])
+router.include_router(speaking_admin_router, prefix="/admin", tags=["admin-speaking"])

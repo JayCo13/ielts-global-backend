@@ -40,6 +40,16 @@ router = APIRouter()
 
 UPLOAD_DIR = "static/student_images"
 
+
+@router.get("/speaking/access", response_model=dict)
+async def speaking_access(current_student: User = Depends(get_current_student)):
+    """Whether this account may use Speaking (VN port). Speaking is open to every account
+    (app/utils/speaking_gate.py); the page asks before rendering so it can show a
+    maintenance panel instead of a broken screen if the gate is ever closed again."""
+    from app.utils.speaking_gate import MAINTENANCE_MESSAGE, speaking_is_open
+    allowed = speaking_is_open(current_student)
+    return {"allowed": allowed, "message": None if allowed else MAINTENANCE_MESSAGE}
+
 @router.get("/speaking/materials", response_model=List[dict])
 async def student_list_speaking_materials(
     part: Optional[str] = None,
