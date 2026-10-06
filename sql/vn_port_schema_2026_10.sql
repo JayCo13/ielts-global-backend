@@ -7,7 +7,7 @@
 --   mysql -h <tidb-host> -P 4000 -u <user> -p <db> < vn_port_schema_2026_10.sql
 --
 -- PRE-CHECKS — stop and report back if any of these differ:
---   SELECT * FROM alembic_version;            -- expect exactly: e5a1c7d2f9b4
+--   SHOW COLUMNS FROM package_transactions LIKE 'payos_order_code'; -- expect: 1 row
 --   SHOW TABLES LIKE 'centers';               -- expect: empty
 --   SHOW COLUMNS FROM users LIKE 'center_id'; -- expect: empty
 --
@@ -1074,3 +1074,10 @@ CREATE TABLE email_broadcasts (
 
 UPDATE alembic_version SET version_num='f2b1e0a7c3d9' WHERE alembic_version.version_num = 'f1a0c0de2026';
 
+
+-- Normalise alembic_version to the single new head, whatever it held before
+-- (prod schema is confirmed at e5a1c7d2f9b4: payos_order_code exists).
+DELETE FROM alembic_version WHERE version_num <> 'f2b1e0a7c3d9';
+INSERT INTO alembic_version (version_num)
+  SELECT 'f2b1e0a7c3d9' FROM DUAL
+  WHERE NOT EXISTS (SELECT 1 FROM alembic_version WHERE version_num = 'f2b1e0a7c3d9');
