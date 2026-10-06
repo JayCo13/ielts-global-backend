@@ -579,7 +579,12 @@ async def get_available_listening_exams(
                     "order_number": s.order_number,
                     "part_title": s.part_title,
                     "duration": s.duration,
-                    "total_marks": s.total_marks
+                    "total_marks": s.total_marks,
+                    "question_type_tags": s.question_type_tags or [],
+                    "forecast_level": s.forecast_level,
+                    "difficulty_label": s.difficulty_label,
+                    "difficulty_score": s.difficulty_score,
+                    "occurrence_count": s.occurrence_count or 0
                 }
                 for s in all_sections
             ]
@@ -643,9 +648,24 @@ async def get_available_listening_exams(
 
         first_section = sections[0]
         part_titles = {}
+        part_forecast_level = {}
+        part_difficulty = {}
+        diff_scores = []
+        occurrence_sum = 0
+        all_question_types = set()
         for s in sections:
             if s["part_title"]:
                 part_titles[s["order_number"]] = s["part_title"]
+            # .get(): entries cached before these keys existed simply lack them.
+            if s.get("question_type_tags"):
+                all_question_types.update(s["question_type_tags"])
+            if s.get("forecast_level"):
+                part_forecast_level[s["order_number"]] = s["forecast_level"]
+            if s.get("difficulty_label"):
+                part_difficulty[s["order_number"]] = s["difficulty_label"]
+            if s.get("difficulty_score") is not None:
+                diff_scores.append(s["difficulty_score"])
+            occurrence_sum += (s.get("occurrence_count") or 0)
 
         latest = results_by_exam.get(exam["exam_id"])
 
@@ -657,7 +677,12 @@ async def get_available_listening_exams(
             "total_marks": first_section["total_marks"],
             "is_completed": latest is not None,
             "total_score": latest.total_score if latest else 0,
-            "part_titles": part_titles
+            "part_titles": part_titles,
+            "part_forecast_level": part_forecast_level,
+            "part_difficulty": part_difficulty,
+            "difficulty_avg": round(sum(diff_scores) / len(diff_scores), 1) if diff_scores else None,
+            "occurrence_sum": occurrence_sum,
+            "question_types": list(all_question_types)
         })
 
     return exam_details
@@ -688,9 +713,10 @@ async def get_writing_forecasts(
         access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
 
     # 3) Batch load all forecast writing tasks (ONE query)
+    # Forecast writing tasks = manually ticked OR auto-forecast (occurrence >= 1)
     all_forecast_tasks = db.query(WritingTask).filter(
         WritingTask.test_id.in_(exam_ids),
-        WritingTask.is_forecast == True
+        or_(WritingTask.is_forecast == True, WritingTask.occurrence_count >= 1)
     ).order_by(WritingTask.part_number).all()
     tasks_by_exam = {}
     for t in all_forecast_tasks:
@@ -735,7 +761,12 @@ async def get_writing_forecasts(
                 "task2_type": t.task2_type,
                 "instructions": t.instructions,
                 "word_limit": t.word_limit,
-                "is_recommended": bool(getattr(t, 'is_recommended', False))
+                "is_recommended": bool(getattr(t, 'is_recommended', False)),
+                "question_type_tags": getattr(t, 'question_type_tags', []) or [],
+                "difficulty_label": t.difficulty_label,
+                "difficulty_score": t.difficulty_score,
+                "forecast_level": t.forecast_level,
+                "occurrence_count": t.occurrence_count or 0,
 
             } for t in forecast_tasks]
         })
@@ -775,7 +806,11 @@ async def get_listening_forecasts(
             ExamSection.section_type == 'listening'
         ).order_by(ExamSection.order_number).all()
 
-        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False)]
+        # Manually ticked OR auto-forecast (occurrence >= 1)
+        forecast_sections = [
+            s for s in sections
+            if getattr(s, 'is_forecast', False) or (getattr(s, 'occurrence_count', 0) or 0) >= 1
+        ]
         if not forecast_sections:
             continue
 
@@ -837,7 +872,12 @@ async def get_listening_forecasts(
                 "completed": attempts_count > 0,
                 "attempts_count": attempts_count,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or []
+                "question_types": getattr(s, 'question_types', None) or [],
+                "question_type_tags": s.question_type_tags or [],
+                "forecast_level": s.forecast_level,
+                "difficulty_label": s.difficulty_label,
+                "difficulty_score": s.difficulty_score,
+                "occurrence_count": s.occurrence_count or 0
             })
 
         result.append({
@@ -1636,6 +1676,7 @@ async def get_exam_result_details(
                 "question_number": i,  # Assign sequential number from 1-40
                 "question_id": question.question_id,
                 "question_type": question.question_type,  # Include question type for frontend evaluation
+                "category": question.stats_category or question.question_type,  # IELTS category for stats
                 "question_text": question.question_text,
                 "student_answer": student_answer,
                 "correct_answer": question.correct_answer,
@@ -1665,6 +1706,7 @@ async def get_exam_result_details(
                 "question_id": question.question_id,
                 "question_number": question.question_number,  # Include question_number for reading exams
                 "question_type": question.question_type,  # Include question type for frontend evaluation
+                "category": question.stats_category or question.question_type,  # IELTS category for stats
                 "question_text": question.question_text,
                 "student_answer": answer.student_answer,
                 "correct_answer": question.correct_answer,
@@ -1999,6 +2041,16 @@ async def get_writing_tasks(
             None,
         )
 
+        # Test-level difficulty avg for sorting: only when ALL tasks are classified.
+        all_classified = bool(tasks) and all(
+            t.difficulty_label and t.difficulty_score is not None for t in tasks
+        )
+        difficulty_avg = (
+            round(sum(t.difficulty_score for t in tasks) / len(tasks), 2)
+            if all_classified else None
+        )
+        occurrence_sum = sum((t.occurrence_count or 0) for t in tasks)
+
         exam_details.append({
             "test_id": exam.exam_id,
             "title": exam.title,
@@ -2006,6 +2058,8 @@ async def get_writing_tasks(
             "is_completed": answered_count == len(tasks),
             "task1_type": part1_task1_type,
             "task2_type": part2_task2_type,
+            "difficulty_avg": difficulty_avg,
+            "occurrence_sum": occurrence_sum,
             "parts": [{
                 "task_id": task.task_id,
                 "part_number": task.part_number,
@@ -2016,7 +2070,9 @@ async def get_writing_tasks(
                 "sample_essay": getattr(task, 'sample_essay', None),
                 "word_limit": task.word_limit,
                 "total_marks": task.total_marks,
-                "duration": task.duration
+                "duration": task.duration,
+                "difficulty_label": task.difficulty_label,
+                "forecast_level": task.forecast_level
             } for task in tasks]
         })
 

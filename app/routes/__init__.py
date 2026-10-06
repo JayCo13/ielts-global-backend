@@ -23,6 +23,10 @@ from .admin.announcement_admin import router as announcement_admin_router
 from .customer.announcements import router as announcements_router
 from .public_seo import router as public_seo_router
 from .admin.marketing import router as admin_marketing_router
+from .admin.difficulty_admin import router as difficulty_admin_router
+from .admin.forecast_auto_admin import router as forecast_auto_admin_router
+from .admin.question_type_admin import router as question_type_admin_router
+from .student.overview_routes import router as student_overview_router
 
 router = APIRouter()
 
@@ -54,3 +58,10 @@ router.include_router(error_report_admin_router, prefix="/admin", tags=["admin-e
 router.include_router(announcement_admin_router, prefix="/admin", tags=["admin-announcement"])
 router.include_router(announcements_router, tags=["announcements"])
 router.include_router(public_seo_router, prefix="/public", tags=["public-seo"])
+# VN F5 port: difficulty recompute trigger (/admin/difficulty/recompute), auto-forecast
+# occurrence admin (/admin/forecast-auto/*), question typing (/admin/question-typing/*)
+# and the student Results Overview (/student/results-overview).
+router.include_router(difficulty_admin_router, prefix="/admin", tags=["admin-difficulty"])
+router.include_router(forecast_auto_admin_router, prefix="/admin", tags=["admin-forecast-auto"])
+router.include_router(question_type_admin_router, prefix="/admin", tags=["admin-question-typing"])
+router.include_router(student_overview_router, prefix="/student", tags=["student-overview"])

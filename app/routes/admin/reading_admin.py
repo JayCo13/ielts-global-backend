@@ -58,6 +58,8 @@ class ReadingForecastUpdate(BaseModel):
     forecast_title: Optional[str] = None
     is_recommended: Optional[bool] = None
     question_types: Optional[List[str]] = None
+    # VN-ported admin tag list, stored alongside global's question_types.
+    question_type_tags: Optional[List[str]] = None
 
 
 # Initialize a new reading test
@@ -290,6 +292,7 @@ async def get_reading_test(
             "forecast_title": getattr(section, 'forecast_title', None),
             "is_recommended": getattr(section, 'is_recommended', False),
             "question_types": getattr(section, 'question_types', None) or [],
+            "question_type_tags": getattr(section, 'question_type_tags', None) or [],
             "expected_questions": expected_count,
             "passage": {
                 "passage_id": passage.passage_id if passage else None,
@@ -328,6 +331,8 @@ async def update_reading_forecast(
         section.is_recommended = update.is_recommended
     if update.question_types is not None:
         section.question_types = update.question_types
+    if update.question_type_tags is not None:
+        section.question_type_tags = update.question_type_tags
     db.add(section)
     db.commit()
     db.refresh(section)
@@ -338,7 +343,8 @@ async def update_reading_forecast(
         "is_forecast": section.is_forecast,
         "forecast_title": section.forecast_title,
         "is_recommended": getattr(section, 'is_recommended', False),
-        "question_types": section.question_types or []
+        "question_types": section.question_types or [],
+        "question_type_tags": section.question_type_tags or []
     }
 
 class ReadingTestDescriptionsUpdate(BaseModel):

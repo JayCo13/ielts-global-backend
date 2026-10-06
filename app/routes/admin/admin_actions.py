@@ -17,6 +17,74 @@ from app.utils.datetime_utils import get_vietnam_time
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 
 router = APIRouter()
+
+
+def snapshot_stats_categories(db: Session, section_id: int) -> Dict:
+    """Capture the admin-assigned IELTS category of a listening part's questions.
+
+    Every listening part update deletes and recreates its Question rows, which used to
+    wipe Question.stats_category — the value the admin "question typing" tool writes and the
+    student stats / teacher per-type breakdown aggregate on. Admins re-edit a part just
+    to add a `locate`, so the assignment has to survive that rewrite.
+
+    Keyed primarily by question_id: the admin edit page round-trips each question's
+    original question_id inside questions_json, so the mapping stays correct even if
+    questions get reordered or one is removed. `ordered` is a positional fallback for
+    payloads that arrive without an id.
+    """
+    rows = (
+        db.query(Question)
+        .filter(Question.section_id == section_id, Question.question_type != 'main_text')
+        .order_by(Question.question_id)
+        .all()
+    )
+    return {
+        'by_id': {q.question_id: q.stats_category for q in rows if q.stats_category},
+        'ordered': [q.stats_category for q in rows],
+    }
+
+
+def restore_stats_categories(db: Session, section_id: int, snapshot: Dict, questions_data: List):
+    """Re-apply a snapshot_stats_categories() result onto the recreated questions.
+
+    Call after the new rows are flushed and before commit. New rows are created by
+    iterating questions_data in order, so row i corresponds to questions_data[i]; that
+    entry carries the pre-rewrite question_id whenever the row already existed.
+    A question the admin has just added has no id and no prior category — it stays
+    unassigned rather than inheriting a neighbour's.
+    """
+    if not snapshot:
+        return
+    by_id = snapshot.get('by_id') or {}
+    ordered = snapshot.get('ordered') or []
+    if not by_id and not any(ordered):
+        return
+
+    rows = (
+        db.query(Question)
+        .filter(Question.section_id == section_id, Question.question_type != 'main_text')
+        .order_by(Question.question_id)
+        .all()
+    )
+    # Only fall back to position when the whole payload lacks ids (an older client). If
+    # ids are present, a question without one is genuinely new and must stay unassigned
+    # rather than inherit the category of whatever used to sit in its slot.
+    payload_has_ids = any(
+        isinstance(p, dict) and p.get('question_id') for p in questions_data
+    )
+    for i, q in enumerate(rows):
+        if q.stats_category:
+            continue
+        payload = questions_data[i] if i < len(questions_data) and isinstance(questions_data[i], dict) else {}
+        old_id = payload.get('question_id')
+        category = by_id.get(old_id) if old_id else None
+        if category is None and not payload_has_ids and i < len(ordered):
+            category = ordered[i]
+        if category:
+            q.stats_category = category
+            db.add(q)
+
+
 def upsert_listening_questions(db: Session, section_id: int, payloads: List[Dict]) -> int:
     """Write a listening part's questions without throwing away question_id.
 
@@ -157,6 +225,9 @@ class ListeningForecastUpdate(BaseModel):
     forecast_title: Optional[str] = None
     is_recommended: Optional[bool] = None
     question_types: Optional[List[str]] = None
+    # VN-ported admin tag list (difficulty/forecast filters, results overview).
+    # Stored alongside global's question_types; never replaces it.
+    question_type_tags: Optional[List[str]] = None
 
 
 class ExamSectionCreate(BaseModel):
@@ -867,6 +938,7 @@ async def get_listening_test_details(
             "forecast_title": getattr(section, 'forecast_title', None),
             "is_recommended": bool(getattr(section, 'is_recommended', False)),
             "question_types": getattr(section, 'question_types', None) or [],
+            "question_type_tags": getattr(section, 'question_type_tags', None) or [],
             "questions": formatted_questions,
         }
         
@@ -904,6 +976,8 @@ async def update_listening_forecast(
         section.is_recommended = update.is_recommended
     if update.question_types is not None:
         section.question_types = update.question_types
+    if update.question_type_tags is not None:
+        section.question_type_tags = update.question_type_tags
     db.add(section)
     db.commit()
     return {
@@ -912,7 +986,8 @@ async def update_listening_forecast(
         "is_forecast": section.is_forecast,
         "forecast_title": section.forecast_title,
         "is_recommended": bool(getattr(section, 'is_recommended', False)),
-        "question_types": section.question_types or []
+        "question_types": section.question_types or [],
+        "question_type_tags": section.question_type_tags or []
     }
 
 @router.get("/listening-test/{exam_id}/part/{part_number}", response_model=dict)
@@ -1126,6 +1201,8 @@ async def update_listening_part_without_audio(
         db.add(main_question)
     
     # Parse transcript to extract question contexts if transcript is provided
+    # Safety net for any rows upsert_listening_questions() has to recreate.
+    stats_snapshot = snapshot_stats_categories(db, section.section_id)
     question_contexts = []
     if transcript:
         soup = BeautifulSoup(transcript, 'html.parser')
@@ -1197,6 +1274,8 @@ async def update_listening_part_without_audio(
         } for q_data, context_data in zip(questions_data, question_contexts)]
 
     upsert_listening_questions(db, section.section_id, payloads)
+    # Only matters for rows that had to be recreated; reused rows keep their own.
+    restore_stats_categories(db, section.section_id, stats_snapshot, questions_data)
 
     db.commit()
     
@@ -1249,6 +1328,8 @@ async def update_listening_part_with_audio(
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
     bold_elements = soup.find_all(['strong', 'b'])
+    # Safety net for any rows upsert_listening_questions() has to recreate.
+    stats_snapshot = snapshot_stats_categories(db, section.section_id)
     question_contexts = []
     processed_numbers = set()
     
@@ -1320,6 +1401,8 @@ async def update_listening_part_with_audio(
         'options': q_data.get('options'),
     } for q_data, context_data in zip(questions_data, question_contexts)]
     upsert_listening_questions(db, section.section_id, payloads)
+    # Only matters for rows that had to be recreated; reused rows keep their own.
+    restore_stats_categories(db, section.section_id, stats_snapshot, questions_data)
 
     db.commit()
 
@@ -1381,6 +1464,8 @@ async def update_listening_part(
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
     bold_elements = soup.find_all(['strong', 'b'])
+    # Safety net for any rows upsert_listening_questions() has to recreate.
+    stats_snapshot = snapshot_stats_categories(db, section.section_id)
     question_contexts = []
     processed_numbers = set()
     
@@ -1456,6 +1541,8 @@ async def update_listening_part(
         'options': q_data.get('options'),
     } for q_data, context_data in zip(questions_data, question_contexts)]
     upsert_listening_questions(db, section.section_id, payloads)
+    # Only matters for rows that had to be recreated; reused rows keep their own.
+    restore_stats_categories(db, section.section_id, stats_snapshot, questions_data)
 
     # Check if all parts are completed
     completed_parts = db.query(ListeningMedia).join(ExamSection).filter(
@@ -1749,6 +1836,8 @@ class ForecastUpdate(BaseModel):
     # Task 2 essay flavour. Send empty string to clear. Only meaningful on
     # part_number=2 rows.
     task2_type: str | None = None
+    # VN-ported writing type tags (results overview groups bands by these).
+    question_type_tags: List[str] | None = None
 
 @router.put("/writing-task/{task_id}/forecast", response_model=dict)
 async def update_writing_task_forecast(
@@ -1771,6 +1860,8 @@ async def update_writing_task_forecast(
     # Same convention for Task 2 type on Part 2 rows.
     if update.task2_type is not None:
         task.task2_type = update.task2_type or None
+    if update.question_type_tags is not None:
+        task.question_type_tags = update.question_type_tags
     db.add(task)
     db.commit()
     return {
@@ -1781,6 +1872,7 @@ async def update_writing_task_forecast(
         "is_recommended": bool(getattr(task, 'is_recommended', False)),
         "task1_type": task.task1_type,
         "task2_type": task.task2_type,
+        "question_type_tags": task.question_type_tags or [],
     }
 
 

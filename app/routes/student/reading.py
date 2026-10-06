@@ -81,7 +81,12 @@ async def get_available_reading_tests(
                     "order_number": s.order_number,
                     "part_title": s.part_title,
                     "duration": s.duration,
-                    "total_marks": s.total_marks
+                    "total_marks": s.total_marks,
+                    "question_type_tags": s.question_type_tags or [],
+                    "forecast_level": s.forecast_level,
+                    "difficulty_label": s.difficulty_label,
+                    "difficulty_score": s.difficulty_score,
+                    "occurrence_count": s.occurrence_count or 0
                 }
                 for s in all_sections
             ]
@@ -143,9 +148,30 @@ async def get_available_reading_tests(
 
         first_section = sections[0]
         part_titles = {}
+        part_difficulty = {}       # {order_number: label} — only classified parts
+        part_forecast_level = {}   # {order_number: level 1-4}
+        occurrence_sum = 0
+        all_question_types = set()
         for s in sections:
             if s["part_title"]:
                 part_titles[s["order_number"]] = s["part_title"]
+            # .get(): entries cached before these keys existed simply lack them.
+            if s.get("question_type_tags"):
+                all_question_types.update(s["question_type_tags"])
+            if s.get("difficulty_label"):
+                part_difficulty[s["order_number"]] = s["difficulty_label"]
+            if s.get("forecast_level"):
+                part_forecast_level[s["order_number"]] = s["forecast_level"]
+            occurrence_sum += (s.get("occurrence_count") or 0)
+
+        # Test-level difficulty avg for sorting: only when ALL parts are classified.
+        all_classified = bool(sections) and all(
+            s.get("difficulty_label") and s.get("difficulty_score") is not None for s in sections
+        )
+        difficulty_avg = (
+            round(sum(s["difficulty_score"] for s in sections) / len(sections), 1)
+            if all_classified else None
+        )
 
         latest = results_by_exam.get(exam["exam_id"])
 
@@ -157,7 +183,12 @@ async def get_available_reading_tests(
             "total_marks": first_section["total_marks"],
             "is_completed": latest is not None,
             "total_score": latest.total_score if latest else 0,
-            "part_titles": part_titles
+            "part_titles": part_titles,
+            "part_difficulty": part_difficulty,
+            "difficulty_avg": difficulty_avg,
+            "part_forecast_level": part_forecast_level,
+            "occurrence_sum": occurrence_sum,
+            "question_types": list(all_question_types)
         })
 
     return exam_details
@@ -620,7 +651,11 @@ async def get_reading_forecasts(
         ).order_by(ExamSection.order_number).all()
 
         from sqlalchemy.sql import func
-        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False)]
+        # Manually ticked OR auto-forecast (occurrence >= 1)
+        forecast_sections = [
+            s for s in sections
+            if getattr(s, 'is_forecast', False) or (getattr(s, 'occurrence_count', 0) or 0) >= 1
+        ]
         if not forecast_sections:
             continue
         section_ids = [s.section_id for s in forecast_sections]
@@ -665,7 +700,12 @@ async def get_reading_forecasts(
                 'completed': attempts_count > 0,
                 'attempts_count': attempts_count,
                 'is_recommended': bool(getattr(s, 'is_recommended', False)),
-                'question_types': getattr(s, 'question_types', None) or []
+                'question_types': getattr(s, 'question_types', None) or [],
+                'question_type_tags': s.question_type_tags or [],
+                'forecast_level': s.forecast_level,
+                'difficulty_label': s.difficulty_label,
+                'difficulty_score': s.difficulty_score,
+                'occurrence_count': s.occurrence_count or 0
             })
         # forecast_sections already ensured
         result.append({
