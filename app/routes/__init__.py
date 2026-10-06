@@ -18,6 +18,8 @@ from .student.dictation_routes import router as student_dictation_router
 from .student.translate_routes import router as student_translate_router
 from .student.error_report_routes import router as error_report_router
 from .admin.error_report_admin import router as error_report_admin_router
+from .admin.announcement_admin import router as announcement_admin_router
+from .customer.announcements import router as announcements_router
 from .public_seo import router as public_seo_router
 from .admin.marketing import router as admin_marketing_router
 
@@ -44,4 +46,8 @@ router.include_router(student_dictation_router, prefix="/student", tags=["studen
 router.include_router(student_translate_router, prefix="/student", tags=["student-translate"])
 router.include_router(error_report_router, prefix="/student", tags=["error-report"])
 router.include_router(error_report_admin_router, prefix="/admin", tags=["admin-error-report"])
+# Homepage announcements: admin CRUD (/admin/announcements) + public no-auth
+# read (/announcements) for the student landing page.
+router.include_router(announcement_admin_router, prefix="/admin", tags=["admin-announcement"])
+router.include_router(announcements_router, tags=["announcements"])
 router.include_router(public_seo_router, prefix="/public", tags=["public-seo"])
