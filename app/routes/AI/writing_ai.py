@@ -825,6 +825,27 @@ def _assist_quota_safe(user: User, db: Session):
     return max(0, ASSIST_FREE_DAILY - used)
 
 
+def _result_blob(answer: WritingAnswer) -> dict:
+    """The stored v2 result, or — for essays graded by the legacy Groq evaluator
+    (/ai/evaluate-and-save, whose improvement_suggestions has a different shape) — a
+    minimal v2-shaped blob built from the stored scores so the review page renders."""
+    blob = answer.improvement_suggestions
+    if isinstance(blob, dict) and isinstance(blob.get("criteria"), dict):
+        return blob
+    return {
+        "overall_band": answer.score,
+        "summary": "Graded by the previous AI evaluator. Edit your essay and re-evaluate for the new detailed feedback.",
+        "criteria": {
+            "task_response": {"score": answer.task_achievement_score, "subscores": []},
+            "coherence_cohesion": {"score": answer.coherence_cohesion_score, "subscores": []},
+            "lexical_resource": {"score": answer.lexical_resource_score, "subscores": []},
+            "grammatical_range": {"score": answer.grammatical_range_score, "subscores": []},
+        },
+        "_detailed": False,
+        "_legacy": True,
+    }
+
+
 @router.get("/writing/result/{task_id}")
 def writing_result(
     task_id: int,
@@ -839,7 +860,7 @@ def writing_result(
         return {"evaluated": False, "result": None, "generated": (answer.ai_generated if answer else None)}
     return {
         "evaluated": True,
-        "result": answer.improvement_suggestions,   # full structured result blob
+        "result": _result_blob(answer),             # full structured result blob
         "overall_band": answer.score,
         "generated": answer.ai_generated,           # persisted outline/sample/keylang
     }
