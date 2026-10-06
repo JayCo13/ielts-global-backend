@@ -41,6 +41,7 @@ from .student.speaking_lessons import router as speaking_lessons_router
 from .admin.speaking_admin import router as speaking_admin_router
 from .admin.listening_alignment_admin import router as listening_alignment_admin_router
 from .student.audio_cues_routes import router as audio_cues_router
+from .admin.email_broadcast import router as email_broadcast_router
 
 router = APIRouter()
 
@@ -106,3 +107,5 @@ router.include_router(speaking_admin_router, prefix="/admin", tags=["admin-speak
 # Listening audio timestamps: admin alignment/cue pins + student per-question replay cues.
 router.include_router(listening_alignment_admin_router, prefix="/admin", tags=["admin-listening-alignment"])
 router.include_router(audio_cues_router, prefix="/student", tags=["student-audio-cues"])
+# Admin email broadcast with history/status (VN); /admin/marketing stays as-is.
+router.include_router(email_broadcast_router, prefix="/admin", tags=["admin-email-broadcast"])
