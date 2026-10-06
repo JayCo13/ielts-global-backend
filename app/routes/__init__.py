@@ -17,6 +17,7 @@ from .student.vocabulary_routes import router as vocabulary_router
 from .student.dictation_routes import router as student_dictation_router
 from .student.translate_routes import router as student_translate_router
 from .student.error_report_routes import router as error_report_router
+from .student.exam_progress_routes import router as exam_progress_router
 from .admin.error_report_admin import router as error_report_admin_router
 from .admin.announcement_admin import router as announcement_admin_router
 from .customer.announcements import router as announcements_router
@@ -45,6 +46,8 @@ router.include_router(vocabulary_router, prefix="/student", tags=["vocabulary"])
 router.include_router(student_dictation_router, prefix="/student", tags=["student-dictation"])
 router.include_router(student_translate_router, prefix="/student", tags=["student-translate"])
 router.include_router(error_report_router, prefix="/student", tags=["error-report"])
+# Exam-room heartbeat (/student/exam/heartbeat[/stop]) — feeds ExamResult.tab_switches.
+router.include_router(exam_progress_router, prefix="/student", tags=["exam-progress"])
 router.include_router(error_report_admin_router, prefix="/admin", tags=["admin-error-report"])
 # Homepage announcements: admin CRUD (/admin/announcements) + public no-auth
 # read (/announcements) for the student landing page.

@@ -10,6 +10,8 @@ from datetime import datetime
 from pydantic import BaseModel
 from app.utils.redis_cache import cache, get_reading_test_cache_key
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.exam_progress import tab_switches_for
+from app.utils.answer_snapshot import build_answer_row, save_answers_snapshot
 import logging
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,8 @@ router = APIRouter()
 
 class ReadingExamSubmission(BaseModel):
     answers: Dict[str, str]  # question_id -> student_answer
+    mode: str = None         # 'practice' | 'exam'
+    time_taken: int = None   # elapsed seconds spent on the attempt
 
 READING_TESTS_STATIC_CACHE_KEY = "reading-tests:static:v1"
 READING_TESTS_STATIC_CACHE_TTL = 120  # seconds — new/edited exams show up within 2 minutes
@@ -407,6 +411,10 @@ async def submit_reading_exam(
                 ExamResult.is_forecast.in_([False, None])
             ).count()
 
+        # Tab switches measured during the attempt. Must check the progress row really
+        # belongs to THIS exam — see app/utils/exam_progress.py.
+        _tab_switches = tab_switches_for(db, current_student.user_id, exam_id, 'reading')
+
         # Create exam result record with forecast flags
         exam_result = ExamResult(
             user_id=current_student.user_id,
@@ -415,13 +423,17 @@ async def submit_reading_exam(
             section_scores={},
             attempt_number=existing_attempts + 1,
             is_forecast=is_forecast_submission,
-            forecast_part=forecast_part if is_forecast_submission else None
+            forecast_part=forecast_part if is_forecast_submission else None,
+            mode=submission.mode if submission.mode in ('practice', 'exam') else None,
+            time_taken=(max(0, submission.time_taken) if isinstance(submission.time_taken, int) else None),
+            tab_switches=_tab_switches,
         )
         db.add(exam_result)
         db.flush()
 
         total_score = 0
         section_scores = {}
+        snapshot_rows = []  # self-contained copy for review after future question edits
 
         # Get all questions for this reading exam ordered by question_number
         all_questions = db.query(Question)\
@@ -509,6 +521,7 @@ async def submit_reading_exam(
                 score=score
             )
             db.add(answer_record)
+            snapshot_rows.append(build_answer_row(question, student_answer, score))
 
             # Determine which part this question belongs to and aggregate scores
             for part_num, (start, end) in part_ranges.items():
@@ -529,6 +542,9 @@ async def submit_reading_exam(
         # Update exam result with total score and section scores
         exam_result.total_score = total_score
         exam_result.section_scores = section_scores
+
+        # Persist a self-contained review snapshot (best-effort; same transaction)
+        save_answers_snapshot(db, exam_result.result_id, snapshot_rows)
         
         # Commit the transaction
         db.commit()

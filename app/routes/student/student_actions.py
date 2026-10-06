@@ -22,6 +22,14 @@ from app.utils.datetime_utils import get_vietnam_time, convert_to_vietnam_time
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
 from datetime import datetime, timedelta
 from app.utils.redis_cache import cache, get_listening_test_cache_key, get_audio_metadata_cache_key
+from app.utils.exam_progress import tab_switches_for
+from app.utils.answer_snapshot import (
+    build_answer_row,
+    save_answers_snapshot,
+    save_annotations,
+    load_snapshot,
+    to_detailed_answers,
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1342,6 +1350,18 @@ async def submit_exam_answers(
         # Extract forecast parameters early to determine if this is a forecast submission
         forecast_part_str = request.query_params.get('forecast_part')
         is_reading_forecast = request.query_params.get('is_reading_forecast') == 'true'
+        submit_mode = request.query_params.get('mode')  # 'practice' | 'exam'
+        if submit_mode not in ('practice', 'exam'):
+            submit_mode = None
+
+        # Elapsed seconds the student spent on the attempt (sent by the frontend).
+        time_taken = None
+        time_taken_str = request.query_params.get('time_taken')
+        if time_taken_str:
+            try:
+                time_taken = max(0, int(float(time_taken_str)))
+            except (ValueError, TypeError):
+                time_taken = None
         
         forecast_part = None
         is_forecast_submission = False
@@ -1392,6 +1412,11 @@ async def submit_exam_answers(
                 ExamResult.is_forecast.in_([False, None])  # Count only full test attempts
             ).count()
 
+        # Tab switches counted during the attempt, read from the ExamProgress row the
+        # exam-room heartbeat keeps. None = not tracked / not certain it belongs to
+        # this attempt (the UI hides the line in that case).
+        _tab_switches = tab_switches_for(db, current_student.user_id, exam_id, 'listening')
+
         # Create exam result record with proper forecast flags
         exam_result = ExamResult(
             user_id=current_student.user_id,
@@ -1400,13 +1425,17 @@ async def submit_exam_answers(
             section_scores={},
             attempt_number=existing_attempts + 1,
             is_forecast=is_forecast_submission,  # Set database column
-            forecast_part=forecast_part if is_forecast_submission else None  # Set database column
+            forecast_part=forecast_part if is_forecast_submission else None,  # Set database column
+            mode=submit_mode,
+            time_taken=time_taken,
+            tab_switches=_tab_switches,
         )
         db.add(exam_result)
         db.flush()
 
         total_score = 0
         section_scores = {}
+        snapshot_rows = []  # self-contained copy for review after future question edits
 
         # Process each answer
         for question_id, student_answer in answers.items():
@@ -1448,6 +1477,7 @@ async def submit_exam_answers(
                     )
                 
                 db.add(answer_record)
+                snapshot_rows.append(build_answer_row(question, student_answer, score))
 
                 # Aggregate section scores
                 section_id = question.section_id
@@ -1458,6 +1488,10 @@ async def submit_exam_answers(
 
         exam_result.total_score = total_score
         exam_result.section_scores = section_scores
+
+        # Persist a self-contained review snapshot (best-effort; same transaction)
+        snapshot_rows.sort(key=lambda r: (r.get("n") is None, r.get("n") or 0))
+        save_answers_snapshot(db, exam_result.result_id, snapshot_rows)
         
         db.commit()
 
@@ -1553,6 +1587,7 @@ async def get_exam_result_details(
     is_listening_exam = any(section.section_type == 'listening' for section in exam_sections)
 
     detailed_answers = []
+    live_answer_count = 0  # live rows actually saved for THIS result (0 => lost/replaced)
     
     if is_listening_exam:
         # Get all questions for this listening exam, excluding main_text questions
@@ -1574,6 +1609,13 @@ async def get_exam_result_details(
         
         for answer in listening_answers:
             answered_questions[answer.question_id] = answer
+
+        # Count only answers whose question still exists in THIS exam. Editing a
+        # listening part can recreate its Question rows, so answer rows may survive
+        # with question_ids that no longer resolve — counting matches is what tells
+        # us whether the live rows are still usable (else the snapshot steps in).
+        live_qids = {q.question_id for q in all_questions}
+        live_answer_count = sum(1 for qid in answered_questions if qid in live_qids)
         
         # Process all questions (1-40) with their evaluation status
         for i, question in enumerate(all_questions, 1):
@@ -1608,9 +1650,15 @@ async def get_exam_result_details(
         student_answers = db.query(StudentAnswer).filter(
             StudentAnswer.result_id == result_id
         ).all()
+        live_answer_count = 0
         
         for answer in student_answers:
             question = answer.question
+            if question is None:
+                # Question deleted by a later admin edit — skip rather than raise,
+                # and leave it out of live_answer_count so the snapshot can step in.
+                continue
+            live_answer_count += 1
             evaluation = "correct" if answer.score > 0 else "wrong"
             
             detailed_answers.append({
@@ -1627,13 +1675,63 @@ async def get_exam_result_details(
                 "evaluation": evaluation
             })
 
+    # Fall back to the self-contained snapshot when the live answer rows are gone
+    # (e.g. admin later edited/replaced this exam's questions). Also surface the
+    # saved highlights/notes.
+    snapshot = load_snapshot(db, result_id)
+    from_snapshot = False
+    if live_answer_count == 0 and snapshot and snapshot.get("answers"):
+        detailed_answers = to_detailed_answers(snapshot["answers"])
+        from_snapshot = True
+
+    annotations = (snapshot or {}).get("annotations") or {}
+
     return {
         "exam_id": exam_result.exam_id,
         "completion_date": exam_result.completion_date,
         "total_score": exam_result.total_score,
         "section_scores": exam_result.section_scores,
-        "detailed_answers": detailed_answers
+        "time_taken": exam_result.time_taken,
+        "mode": exam_result.mode,
+        "tab_switches": exam_result.tab_switches,
+        "detailed_answers": detailed_answers,
+        "from_snapshot": from_snapshot,
+        "highlights": annotations.get("highlights", []),
+        "notes": annotations.get("notes", []),
     }
+
+class AnnotationsPayload(BaseModel):
+    highlights: Optional[List[dict]] = None
+    notes: Optional[List[dict]] = None
+
+@router.post("/exam-result/{result_id}/annotations", response_model=Dict)
+async def save_result_annotations(
+    result_id: int,
+    payload: AnnotationsPayload,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Attach the student's highlights/notes to a result's review snapshot.
+    Called by the exam room right after a successful submit."""
+    exam_result = db.query(ExamResult).filter(
+        ExamResult.result_id == result_id,
+        ExamResult.user_id == current_student.user_id
+    ).first()
+    if not exam_result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam result not found")
+
+    try:
+        save_annotations(
+            db, result_id,
+            highlights=payload.highlights,
+            notes=payload.notes,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not save annotations")
+    return {"status": "ok"}
+
 @router.get("/my-exam-history", response_model=List[dict])
 async def get_student_exam_history(
     current_student = Depends(get_current_student),
@@ -1713,7 +1811,9 @@ async def get_student_exam_history(
             "exam_type": exam_type,
             "is_forecast": bool(result.is_forecast),
             "forecast_part": result.forecast_part if result.is_forecast else None,
-            "part_number": result.forecast_part if result.is_forecast else None
+            "part_number": result.forecast_part if result.is_forecast else None,
+            "mode": getattr(result, 'mode', None),
+            "time_taken": getattr(result, 'time_taken', None)
         })
     
     return result_list
