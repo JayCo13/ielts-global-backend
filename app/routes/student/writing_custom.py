@@ -110,9 +110,13 @@ async def create_custom_writing(
         raise HTTPException(status_code=400, detail="Part 1 requires an image of the task (chart/diagram).")
     # Only accept URLs produced by our own upload endpoint: the grader fetches this
     # image server-side, so an arbitrary URL would let a student make us fetch anything.
-    from app.utils.r2_storage import R2_PUBLIC_URL
+    try:
+        from app.utils.r2_storage import R2_PUBLIC_URL
+        r2_prefix = f"{R2_PUBLIC_URL}/images/writing_custom/"
+    except Exception:   # noqa: BLE001 — storage client unavailable: only local fallback URLs
+        r2_prefix = None
     img = (payload.image_url or "").strip()
-    if img and not (img.startswith(f"{R2_PUBLIC_URL}/images/writing_custom/")
+    if img and not ((r2_prefix and img.startswith(r2_prefix))
                     or img.startswith("/static/writing_custom/")):
         raise HTTPException(status_code=400, detail="Please upload the image with the upload button.")
 

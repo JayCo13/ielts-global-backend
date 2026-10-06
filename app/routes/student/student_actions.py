@@ -2047,7 +2047,9 @@ async def get_writing_tasks(
             WritingAttempt.user_id == current_student.user_id,
             WritingAttempt.test_id.in_(exam_ids),
         ).all():
-            by.setdefault(a.test_id, {}).setdefault(a.attempt_number, {})[a.part_number] = a.score
+            # Ungraded answers carry score=0 by default — only AI bands count.
+            by.setdefault(a.test_id, {}).setdefault(a.attempt_number, {})[a.part_number] = (
+                a.score if a.is_ai_evaluated else None)
         for tid, atts in by.items():
             sc = atts[max(atts.keys())]
             attempt_overall[tid] = _writing_overall(sc)
@@ -2574,13 +2576,14 @@ async def get_writing_attempts(
     out = []
     for num in sorted(by_num.keys(), reverse=True):
         parts = by_num[num]
-        overall = _writing_overall({p.part_number: p.score for p in parts})
+        # Ungraded answers carry score=0 by default — only AI bands count.
+        overall = _writing_overall({p.part_number: (p.score if p.is_ai_evaluated else None) for p in parts})
         latest = max((p.created_at for p in parts if p.created_at), default=None)
         out.append({
             "attempt_number": num,
             "overall_band": overall,
             "created_at": latest,
-            "parts": [{"part_number": p.part_number, "band": p.score,
+            "parts": [{"part_number": p.part_number, "band": (p.score if p.is_ai_evaluated else None),
                        "is_ai_evaluated": bool(p.is_ai_evaluated)}
                       for p in sorted(parts, key=lambda x: x.part_number or 0)],
         })
@@ -2602,7 +2605,7 @@ async def get_writing_forecast_history(
     ).order_by(WritingAttempt.attempt_number.desc()).all()
     return [{
         "attempt_number": r.attempt_number,
-        "band": r.score,
+        "band": r.score if r.is_ai_evaluated else None,
         "created_at": r.created_at,
         "is_ai_evaluated": bool(r.is_ai_evaluated),
     } for r in rows]
