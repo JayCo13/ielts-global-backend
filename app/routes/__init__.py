@@ -27,6 +27,9 @@ from .admin.difficulty_admin import router as difficulty_admin_router
 from .admin.forecast_auto_admin import router as forecast_auto_admin_router
 from .admin.question_type_admin import router as question_type_admin_router
 from .student.overview_routes import router as student_overview_router
+from .student.leaderboard_routes import router as leaderboard_router
+from .admin.top_performers_admin import router as top_performers_admin_router
+from .admin.monthly_cup_admin import router as monthly_cup_admin_router
 
 router = APIRouter()
 
@@ -65,3 +68,9 @@ router.include_router(difficulty_admin_router, prefix="/admin", tags=["admin-dif
 router.include_router(forecast_auto_admin_router, prefix="/admin", tags=["admin-forecast-auto"])
 router.include_router(question_type_admin_router, prefix="/admin", tags=["admin-question-typing"])
 router.include_router(student_overview_router, prefix="/student", tags=["student-overview"])
+# VN F4 port: per-test leaderboard, Monthly Cup, Hall of Fame (/student/leaderboard/{id},
+# /student/monthly-cup, /student/hall-of-fame) + job triggers (no cron on Koyeb):
+# /admin/top-performers/recompute, /admin/monthly-cup/snapshot, /admin/monthly-cup/backfill.
+router.include_router(leaderboard_router, prefix="/student", tags=["leaderboard"])
+router.include_router(top_performers_admin_router, prefix="/admin", tags=["admin-top-performers"])
+router.include_router(monthly_cup_admin_router, prefix="/admin", tags=["admin-monthly-cup"])

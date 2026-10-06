@@ -178,6 +178,12 @@ async def get_student_profile(
         "can_dictation": bool(
             current_student.role == "student" or getattr(current_student, "can_dictation", False)
         ),
+        # Top Performer badge (recomputed by app.jobs.top_performers).
+        "is_top_performer": bool(getattr(current_student, "is_top_performer", False)),
+        "top10_count": int(getattr(current_student, "top10_count", 0) or 0),
+        "read_top10_count": int(getattr(current_student, "read_top10_count", 0) or 0),
+        "listen_top10_count": int(getattr(current_student, "listen_top10_count", 0) or 0),
+        "write_top10_count": int(getattr(current_student, "write_top10_count", 0) or 0),
     }
 @router.get("/exam/{exam_id}/audio")
 async def stream_combined_audio(
