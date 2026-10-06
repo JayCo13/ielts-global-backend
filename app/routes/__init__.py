@@ -11,6 +11,8 @@ from .customer.lemonsqueezy_webhook import router as lemonsqueezy_webhook_router
 from .customer.payos_webhook import router as payos_webhook_router
 from .AI.ai import router as ai_router
 from .AI.writing_ai import router as writing_ai_router
+from .student.writing_custom import router as writing_custom_router
+from .admin.writing_custom_admin import router as writing_custom_admin_router
 from .auth import router as auth_router
 from .admin.multiple_actions import router as multiple_actions_router
 from .student.multiple_actions import router as student_multiple_actions_router
@@ -52,6 +54,10 @@ router.include_router(ai_router, prefix="/ai", tags=["ai"])
 # Writing AI v2 (Gemini) — /ai/writing/grade|quota|result|spellcheck|outline|sample|keylang|analyze|assist/*.
 # Ported from VN; the legacy Groq /ai/evaluate-and-save above is kept.
 router.include_router(writing_ai_router, prefix="/ai", tags=["ai-writing"])
+# Student Custom Writing Tasks (/student/writing/custom*) + admin purge trigger
+# (/admin/writing-custom/purge — no cron on Koyeb). Ported from VN.
+router.include_router(writing_custom_router, prefix="/student", tags=["writing-custom"])
+router.include_router(writing_custom_admin_router, prefix="/admin", tags=["admin-writing-custom"])
 router.include_router(auth_router, tags=["auth"])
 router.include_router(vocabulary_router, prefix="/student", tags=["vocabulary"])
 router.include_router(student_dictation_router, prefix="/student", tags=["student-dictation"])
