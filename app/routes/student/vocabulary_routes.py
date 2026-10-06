@@ -42,10 +42,12 @@ async def add_vocabulary(
     current_user: User = Depends(get_current_student)
 ):
     """Add a new vocabulary word."""
-    if vocab.source_type not in ['listening', 'reading']:
+    # VN Speaking port: words can now be saved from Writing and Speaking too (the
+    # vocab_source_types ENUM already includes both — alembic vocab_ws_2026).
+    if vocab.source_type not in ['listening', 'reading', 'writing', 'speaking']:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="source_type must be 'listening' or 'reading'"
+            detail="source_type must be one of listening/reading/writing/speaking"
         )
     
     new_vocab = SavedVocabulary(
