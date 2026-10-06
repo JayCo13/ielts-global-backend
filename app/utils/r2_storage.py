@@ -109,3 +109,59 @@ def delete_object_from_r2(public_url: str) -> bool:
     except Exception as e:
         print(f"Error deleting from R2: {e}")
         return False
+
+
+# ── Private objects (Speaking recordings) ─────────────────────────────────────────────
+#
+# Added for the Speaking port. VN keeps student recordings on local disk outside static/;
+# Koyeb's disk is ephemeral, so global keeps them in R2 instead. These objects are NEVER
+# handed to the browser as a URL: the backend reads them with the S3 API and streams them
+# through an ownership-checked route. Keys are random (see speaking_test._recording_key),
+# so even when the bucket also has a public r2.dev domain a recording cannot be guessed.
+# Set R2_SPEAKING_BUCKET to a bucket WITHOUT public access to make that guarantee hard;
+# it defaults to the main bucket so nothing new has to be provisioned.
+R2_SPEAKING_BUCKET = os.getenv("R2_SPEAKING_BUCKET") or R2_BUCKET_NAME
+
+
+def r2_configured() -> bool:
+    """True when R2 credentials are present. Callers degrade gracefully when False."""
+    return bool(R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY)
+
+
+def put_private_object(key: str, data: bytes, content_type: str = "application/octet-stream",
+                       bucket: str = None) -> str:
+    """Store bytes under `key` (no public URL is returned). Raises on failure."""
+    client = get_r2_client()
+    client.put_object(
+        Bucket=bucket or R2_SPEAKING_BUCKET,
+        Key=key,
+        Body=data,
+        ContentType=content_type,
+    )
+    return key
+
+
+def get_private_object(key: str, bucket: str = None):
+    """Bytes stored under `key`, or None when the object does not exist / R2 fails."""
+    if not key:
+        return None
+    try:
+        client = get_r2_client()
+        resp = client.get_object(Bucket=bucket or R2_SPEAKING_BUCKET, Key=key)
+        return resp["Body"].read()
+    except Exception as e:
+        print(f"Error reading from R2 ({key}): {e}")
+        return None
+
+
+def delete_private_object(key: str, bucket: str = None) -> bool:
+    """Delete `key`. S3 delete is idempotent, so a missing object still returns True."""
+    if not key:
+        return False
+    try:
+        client = get_r2_client()
+        client.delete_object(Bucket=bucket or R2_SPEAKING_BUCKET, Key=key)
+        return True
+    except Exception as e:
+        print(f"Error deleting from R2 ({key}): {e}")
+        return False
