@@ -54,6 +54,7 @@ class CreateStudentRequest(BaseModel):
     username: str
     email: str
     image_url: Optional[str] = None
+    months: Optional[int] = None  # course-window length in months; null → default 90 days
 
 class GoogleLogin(BaseModel):
     email: EmailStr
@@ -81,6 +82,15 @@ if not SECRET_KEY:
 SITE_NAME = os.getenv("SITE_NAME", "Ielts Computer Test")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 90
+
+DEFAULT_COURSE_DAYS = 90  # student course-window length when not set per-account
+
+
+def _course_days(user) -> int:
+    """Per-student course window in days (admin can set it at creation via 'months').
+    Falls back to the default 90 for accounts created before this was configurable."""
+    return getattr(user, "course_days", None) or DEFAULT_COURSE_DAYS
+
 
 # Google OAuth configuration
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -715,14 +725,21 @@ async def get_current_student(
         )
     
     # Check if account has expired (only for student accounts) - do this BEFORE is_active check
-    if user.role == "student" and user.account_activated_at is not None:
-        expiry_date = user.account_activated_at + timedelta(days=90)
-        if get_vietnam_time().replace(tzinfo=None) > expiry_date:
-            # Convert student to customer and reactivate
-            user.role = "customer"
-            user.is_active = True  # Reactivate the account
-            db.commit()
-            # User continues as customer with VIP restrictions
+    # Anchor the course window on account_activated_at when present, else fall
+    # back to created_at (ported from VN). The fallback is essential:
+    # account_activated_at is only set by /activate-account, but students are also
+    # activated by an admin toggling is_active_student via PUT /students/{id},
+    # which never set it — without the fallback they stay 'student' forever.
+    if user.role == "student":
+        course_start = user.account_activated_at or user.created_at
+        if course_start is not None:
+            expiry_date = course_start + timedelta(days=_course_days(user))
+            if get_vietnam_time().replace(tzinfo=None) > expiry_date:
+                # Convert student to customer and reactivate
+                user.role = "customer"
+                user.is_active = True  # Reactivate the account
+                db.commit()
+                # User continues as customer with VIP restrictions
     
     # Check if account is active (skip for converted customers)
     if not user.is_active:
@@ -1409,7 +1426,14 @@ def create_student(
         image_url=student.image_url or DEFAULT_STUDENT_IMAGE,
         status='offline'
     )
-    
+
+    # Optional per-account course window: admin sets the number of months. The
+    # window starts now (account activated at creation); null → default 90 days.
+    if student.months and student.months > 0:
+        new_student.course_days = student.months * 30
+        new_student.account_activated_at = vietnam_time.replace(tzinfo=None)
+        new_student.is_active_student = True
+
     db.add(new_student)
     db.commit()
     db.refresh(new_student)
@@ -1444,8 +1468,42 @@ async def get_students(
         # Determine status based on last_active timestamp - ensure both times are in UTC for comparison
         "status": "offline" if student.status == "offline" or (student.last_active and student.last_active < offline_threshold) else "online",
         "is_active": student.is_active,
-        "is_active_student": getattr(student, 'is_active_student', False)
+        "is_active_student": getattr(student, 'is_active_student', False),
+        "role": student.role,
+        "can_dictation": bool(getattr(student, 'can_dictation', False)),
     } for student in students]
+
+
+class DictationPermissionUpdate(BaseModel):
+    enabled: bool
+
+
+@router.put("/students/{student_id}/dictation", response_model=dict)
+async def set_dictation_permission(
+    student_id: int,
+    payload: DictationPermissionUpdate,
+    current_admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """Grant or revoke access to Dictation for one account (ported from VN).
+
+    Dictation used to be gated on role='student' only. Admin can now hand it out
+    per account, so a customer gets it without changing their role (and the
+    student course window that comes with it).
+    """
+    user = db.query(User).filter(
+        User.user_id == student_id,
+        User.role.in_(["student", "customer"]),
+    ).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Student not found")
+    user.can_dictation = bool(payload.enabled)
+    db.commit()
+    return {
+        "user_id": user.user_id,
+        "username": user.username,
+        "can_dictation": user.can_dictation,
+    }
 # admin reset student password
 @router.post("/students/{student_id}/reset-password", response_model=dict)
 async def reset_student_password(
@@ -1537,6 +1595,11 @@ async def update_student(
         
     if student_data.is_active_student is not None:
         student.is_active_student = student_data.is_active_student
+        # Activating a student here bypasses the /activate-account flow, so start
+        # the course clock now if it hasn't been started yet — otherwise the
+        # auto-conversion to customer would have no activation anchor.
+        if student_data.is_active_student and student.account_activated_at is None:
+            student.account_activated_at = get_vietnam_time().replace(tzinfo=None)
     
     db.commit()
     db.refresh(student)
@@ -1570,7 +1633,7 @@ async def activate_student_account(
     # Check if account is already activated
     if current_user.account_activated_at is not None:
         # Calculate remaining days
-        expiry_date = current_user.account_activated_at + timedelta(days=90)
+        expiry_date = current_user.account_activated_at + timedelta(days=_course_days(current_user))
         remaining_days = (expiry_date - get_vietnam_time().replace(tzinfo=None)).days
         
         if remaining_days > 0:
@@ -1589,14 +1652,14 @@ async def activate_student_account(
     db.commit()
     
     # Calculate expiry date
-    expiry_date = current_user.account_activated_at + timedelta(days=90)
+    expiry_date = current_user.account_activated_at + timedelta(days=_course_days(current_user))
     
     return {
         "message": "Account activated successfully",
         "user_id": current_user.user_id,
         "activated_at": current_user.account_activated_at,
         "expires_at": expiry_date,
-        "remaining_days": 90
+        "remaining_days": _course_days(current_user)
     }
 
 @router.get("/account-status", response_model=dict)
@@ -1625,7 +1688,7 @@ async def get_account_status(
         }
     
     # Calculate expiry date and remaining days
-    expiry_date = current_user.account_activated_at + timedelta(days=90)
+    expiry_date = current_user.account_activated_at + timedelta(days=_course_days(current_user))
     remaining_days = (expiry_date - get_vietnam_time().replace(tzinfo=None)).days
     
     # Determine if account is expired

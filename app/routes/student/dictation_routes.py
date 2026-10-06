@@ -10,6 +10,19 @@ from app.routes.student.student_actions import get_current_student
 router = APIRouter()
 
 
+def _require_dictation(user: User):
+    """Dictation is for role='student' accounts plus anyone an admin has granted it
+    (ported from VN). The route used to be open to every customer while only the
+    navbar hid it — this closes that gap too.
+    """
+    if user.role == "student" or getattr(user, "can_dictation", False):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="Dictation is available to enrolled students only. Your account does not have access yet.",
+    )
+
+
 class WordResponse(BaseModel):
     word_id: int
     word: str
@@ -47,6 +60,7 @@ async def list_active_units(
     current_user: User = Depends(get_current_student)
 ):
     """List all active dictation units for students."""
+    _require_dictation(current_user)
     units = db.query(DictationUnit).filter(
         DictationUnit.is_active == True
     ).order_by(DictationUnit.created_at.desc()).all()
@@ -77,6 +91,7 @@ async def get_unit_words(
     current_user: User = Depends(get_current_student)
 ):
     """Get all words in a unit for dictation practice."""
+    _require_dictation(current_user)
     unit = db.query(DictationUnit).filter(
         DictationUnit.unit_id == unit_id,
         DictationUnit.is_active == True
@@ -125,6 +140,7 @@ async def toggle_word_important(
     current_user: User = Depends(get_current_student)
 ):
     """Toggle the important status of a word for the current student."""
+    _require_dictation(current_user)
     word = db.query(DictationWord).filter(DictationWord.word_id == word_id).first()
     
     if not word:

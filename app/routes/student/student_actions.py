@@ -165,7 +165,11 @@ async def get_student_profile(
         "email": current_student.email,
         "image_url": image_url,
         "role": current_student.role,  # Include role for frontend verification
-        "is_google_account": bool(current_student.google_id)  # True if registered via Google
+        "is_google_account": bool(current_student.google_id),  # True if registered via Google
+        # Dictation is granted per account (admin toggle), not only by role='student'.
+        "can_dictation": bool(
+            current_student.role == "student" or getattr(current_student, "can_dictation", False)
+        ),
     }
 @router.get("/exam/{exam_id}/audio")
 async def stream_combined_audio(
