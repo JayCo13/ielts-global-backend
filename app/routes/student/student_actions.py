@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, joinedload  # Add joinedload here
 from typing import Optional
 from app.database import get_db
 from app.models.models import ExamAccessType, User, ExamResult, Exam, ExamSection, Question, QuestionOption, ReadingPassage, ListeningMedia, WritingTask, StudentAnswer, WritingAnswer, ListeningAnswer, SpeakingMaterial
+from app.models.models import WritingAttempt  # VN writing port: retake snapshots
 from app.routes.admin.auth import get_current_student, check_exam_access
 from app.utils.exam_access import require_exam_access
 from app.utils.upload_security import validate_image_bytes
@@ -132,9 +133,11 @@ class ExamResultResponse(BaseModel):
 
 class WritingAnswerSubmit(BaseModel):
     answer_text: str
+    time_taken: Optional[int] = None   # seconds spent writing (VN port)
 class WritingTestSubmit(BaseModel):
     part1_answer: str
     part2_answer: str
+    time_taken: Optional[int] = None   # seconds spent writing (VN port)
 
 @router.get("/user-role/{user_id}", response_model=dict)
 async def get_user_role_by_id(
@@ -735,6 +738,17 @@ async def get_writing_forecasts(
     elif current_student.role == 'customer':
         allowed_types = ['no vip', 'vip'] if current_student.is_vip else ['no vip']
 
+    # VN port: this user's AI band per forecast task (shown on each Part card).
+    band_by_task = {}
+    forecast_task_ids = [t.task_id for t in all_forecast_tasks]
+    if forecast_task_ids:
+        for ans in db.query(WritingAnswer).filter(
+            WritingAnswer.task_id.in_(forecast_task_ids),
+            WritingAnswer.user_id == current_student.user_id,
+            WritingAnswer.is_ai_evaluated == True,  # noqa: E712
+        ).all():
+            band_by_task[ans.task_id] = ans.score
+
     # Build response using pre-loaded data
     result = []
     for exam in exams:
@@ -773,7 +787,7 @@ async def get_writing_forecasts(
                 "difficulty_score": t.difficulty_score,
                 "forecast_level": t.forecast_level,
                 "occurrence_count": t.occurrence_count or 0,
-
+                "band": band_by_task.get(t.task_id),
             } for t in forecast_tasks]
         })
 
@@ -2008,12 +2022,35 @@ async def get_writing_tasks(
     # 4) Batch load all user's writing answers (ONE query)
     all_task_ids = [t.task_id for t in all_tasks]
     user_answers_set = set()
+    task_meta = {t.task_id: (t.test_id, t.part_number) for t in all_tasks}
+    scores_by_exam = {}   # VN port: exam_id -> {part_number: AI band}
     if all_task_ids:
-        user_answer_rows = db.query(WritingAnswer.task_id).filter(
+        user_answer_rows = db.query(
+            WritingAnswer.task_id, WritingAnswer.is_ai_evaluated, WritingAnswer.score
+        ).filter(
             WritingAnswer.task_id.in_(all_task_ids),
             WritingAnswer.user_id == current_student.user_id
         ).all()
         user_answers_set = set(row[0] for row in user_answer_rows)
+        for tid, evaluated, score in user_answer_rows:
+            if evaluated and score is not None and tid in task_meta:
+                ex_id, pn = task_meta[tid]
+                if pn:
+                    scores_by_exam.setdefault(ex_id, {})[pn] = float(score)
+
+    # VN port: fallback Overall from the latest retake snapshot, so the band still shows
+    # after "Retake" moved the graded result into history.
+    attempt_overall = {}
+    if exam_ids:
+        by = {}
+        for a in db.query(WritingAttempt).filter(
+            WritingAttempt.user_id == current_student.user_id,
+            WritingAttempt.test_id.in_(exam_ids),
+        ).all():
+            by.setdefault(a.test_id, {}).setdefault(a.attempt_number, {})[a.part_number] = a.score
+        for tid, atts in by.items():
+            sc = atts[max(atts.keys())]
+            attempt_overall[tid] = _writing_overall(sc)
 
     # Determine allowed access types
     allowed_types = []
@@ -2057,11 +2094,17 @@ async def get_writing_tasks(
         )
         occurrence_sum = sum((t.occurrence_count or 0) for t in tasks)
 
+        # VN port: overall Writing band = round_ielts((Task1 + 2*Task2)/3) from AI scores.
+        overall_band = _writing_overall(scores_by_exam.get(exam.exam_id, {}))
+        if overall_band is None:
+            overall_band = attempt_overall.get(exam.exam_id)
+
         exam_details.append({
             "test_id": exam.exam_id,
             "title": exam.title,
             "created_at": exam.created_at,
             "is_completed": answered_count == len(tasks),
+            "overall_band": overall_band,
             "task1_type": part1_task1_type,
             "task2_type": part2_task2_type,
             "difficulty_avg": difficulty_avg,
@@ -2165,6 +2208,8 @@ async def get_writing_test_answers(
             "answer": {
                 "answer_text": answer.answer_text if answer else None,
                 "score": answer.score if answer else None,
+                "time_taken": answer.time_taken if answer else None,
+                "locked": bool(answer.locked) if answer else False,
                 "created_at": answer.created_at if answer else None,
                 "updated_at": answer.updated_at if answer else None
             }
@@ -2214,6 +2259,8 @@ async def submit_complete_writing_test(
 
         if writing_answer:
             writing_answer.answer_text = answer_text
+            if answers.time_taken is not None:
+                writing_answer.time_taken = answers.time_taken
             writing_answer.updated_at = get_vietnam_time().replace(tzinfo=None)
         else:
             writing_answer = WritingAnswer(
@@ -2221,6 +2268,7 @@ async def submit_complete_writing_test(
                 user_id=current_student.user_id,
                 answer_text=answer_text,
                 score=0,
+                time_taken=answers.time_taken,
                 created_at=get_vietnam_time().replace(tzinfo=None),
                 updated_at=get_vietnam_time().replace(tzinfo=None)
             )
@@ -2262,6 +2310,9 @@ async def submit_writing_answer(
         WritingAnswer.user_id == current_student.user_id
     ).first()
 
+    if writing_answer and writing_answer.locked:
+        # VN port: a finalized (locked) essay lives in history; edit via a retake.
+        raise HTTPException(status_code=403, detail="This essay is locked (saved to your history). Use 'Retake' to start a new attempt.")
     if writing_answer:
         writing_answer.answer_text = answer_data.answer_text
         writing_answer.updated_at = get_vietnam_time().replace(tzinfo=None)
@@ -2303,4 +2354,389 @@ async def submit_writing_answer(
             "submitted": bool(other_part[1]) if other_part else False
         } if other_part else None
     }
+
+
+# ---------------------------------------------------------------------------
+# VN port — Writing attempts / history / review flow.
+# Added ALONGSIDE the global endpoints above (which stay unchanged in shape).
+# "Retake" snapshots the live WritingAnswer rows into writing_attempts and clears
+# them; "finalize" (end review) locks graded essays into history.
+# ---------------------------------------------------------------------------
+
+def _round_ielts_overall(raw: float) -> float:
+    """IELTS-style rounding of a Writing Overall: <.25 → down to the whole band;
+    .25–<.75 → .5; ≥.75 → next whole band."""
+    import math
+    base = math.floor(raw)
+    frac = raw - base
+    if frac < 0.25:
+        return float(base)
+    if frac < 0.75:
+        return base + 0.5
+    return float(base + 1)
+
+
+def _writing_overall(scores_by_part: dict):
+    """{part_number: band} → overall band. Full test = round((T1 + 2*T2)/3); a single
+    graded part = that part's band; nothing graded = None."""
+    sc = {k: v for k, v in (scores_by_part or {}).items() if v is not None}
+    if 1 in sc and 2 in sc:
+        return _round_ielts_overall((float(sc[1]) + float(sc[2]) * 2) / 3)
+    vals = list(sc.values())
+    return float(vals[0]) if vals else None
+
+
+def _snapshot_writing_answers(db: Session, test_id: int, user_id: int, answers, part_by_task: dict) -> int:
+    """Copy live answers into writing_attempts under the next attempt_number for
+    (test_id, user_id). Returns the attempt number used (0 if nothing was copied)."""
+    from sqlalchemy.sql import func
+    now = get_vietnam_time().replace(tzinfo=None)
+    last_num = db.query(func.max(WritingAttempt.attempt_number)).filter(
+        WritingAttempt.test_id == test_id,
+        WritingAttempt.user_id == user_id,
+    ).scalar() or 0
+    next_num = last_num + 1
+    copied = 0
+    for ans in answers:
+        if (ans.answer_text or "").strip():
+            db.add(WritingAttempt(
+                test_id=test_id, task_id=ans.task_id, user_id=user_id,
+                part_number=part_by_task.get(ans.task_id), attempt_number=next_num,
+                answer_text=ans.answer_text, score=ans.score,
+                task_achievement_score=ans.task_achievement_score,
+                coherence_cohesion_score=ans.coherence_cohesion_score,
+                lexical_resource_score=ans.lexical_resource_score,
+                grammatical_range_score=ans.grammatical_range_score,
+                is_ai_evaluated=ans.is_ai_evaluated,
+                result=ans.improvement_suggestions, ai_generated=ans.ai_generated,
+                time_taken=ans.time_taken,
+                created_at=ans.updated_at or ans.created_at or now,
+            ))
+            copied += 1
+    return next_num if copied else 0
+
+
+@router.get("/writing/history", response_model=List[dict])
+async def get_writing_history(
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """The student's AI-evaluated Writing tests (current, un-retaken answers).
+    Overall band: Full Test = round((Task1 + Task2*2)/3); single part (forecast /
+    custom task) = that part's band. Also returns averaged TR/CC/LR/GRA."""
+    rows = (
+        db.query(WritingAnswer, WritingTask, Exam)
+        .join(WritingTask, WritingTask.task_id == WritingAnswer.task_id)
+        .join(Exam, Exam.exam_id == WritingTask.test_id)
+        .filter(
+            WritingAnswer.user_id == current_student.user_id,
+            WritingAnswer.is_ai_evaluated == True  # noqa: E712
+        ).all()
+    )
+
+    by_exam = {}
+    for ans, task, exam in rows:
+        e = by_exam.setdefault(exam.exam_id, {"exam": exam, "tasks": {}})
+        e["tasks"][task.part_number or 0] = {
+            "score": ans.score,
+            "tr": ans.task_achievement_score,
+            "cc": ans.coherence_cohesion_score,
+            "lr": ans.lexical_resource_score,
+            "gra": ans.grammatical_range_score,
+            "updated_at": ans.updated_at or ans.created_at,
+            "is_forecast": bool(task.is_forecast),
+        }
+
+    out = []
+    for exam_id, e in by_exam.items():
+        tasks = e["tasks"]
+        overall = _writing_overall({k: t["score"] for k, t in tasks.items()})
+
+        def _avg(k):
+            vals = [t[k] for t in tasks.values() if t.get(k) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else None
+
+        latest = max((t["updated_at"] for t in tasks.values() if t["updated_at"]), default=None)
+        is_custom = bool(e["exam"].created_by == current_student.user_id and e["exam"].is_active == False)  # noqa: E712
+        out.append({
+            "test_id": exam_id,
+            "title": _strip_custom_prefix(e["exam"].title),
+            "overall_band": overall,
+            "tr": _avg("tr"), "cc": _avg("cc"), "lr": _avg("lr"), "gra": _avg("gra"),
+            "part_count": len(tasks),
+            "is_forecast": any(t["is_forecast"] for t in tasks.values()),
+            "is_custom": is_custom,
+            "evaluated_at": latest,
+        })
+
+    out.sort(key=lambda x: (x["evaluated_at"].isoformat() if x["evaluated_at"] else ""), reverse=True)
+    return out
+
+
+# Title prefix stamped on student-created "Custom Tasks" (hidden exams). Must match
+# CUSTOM_PREFIX in app/routes/student/writing_custom.py.
+WRITING_CUSTOM_PREFIX = "[Custom] "
+
+
+def _strip_custom_prefix(title: str) -> str:
+    return (title or "").replace(WRITING_CUSTOM_PREFIX, "")
+
+
+@router.get("/writing/test/{test_id}/parts", response_model=List[dict])
+async def get_writing_test_parts(
+    test_id: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    tasks = db.query(WritingTask).filter(
+        WritingTask.test_id == test_id
+    ).order_by(WritingTask.part_number).all()
+    if not tasks:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No writing tasks found for this test")
+    return [{
+        "task_id": task.task_id,
+        "part_number": task.part_number,
+        "task_type": task.task_type,
+        "duration": task.duration,
+        "word_limit": task.word_limit
+    } for task in tasks]
+
+
+@router.delete("/writing/test/{test_id}/reset", response_model=dict)
+async def reset_writing_test(
+    test_id: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """"Retake" = keep the previous result as a version (do NOT delete): snapshot each
+    current answer into writing_attempts, then clear the live answers so the retake
+    starts fresh. Snapshots stay reviewable in history."""
+    tasks = db.query(WritingTask).filter(WritingTask.test_id == test_id).all()
+    if not tasks:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No writing tasks found for this test")
+
+    task_ids = [task.task_id for task in tasks]
+    part_by_task = {t.task_id: t.part_number for t in tasks}
+    answers = db.query(WritingAnswer).filter(
+        WritingAnswer.task_id.in_(task_ids),
+        WritingAnswer.user_id == current_student.user_id,
+    ).all()
+    attempt_number = _snapshot_writing_answers(db, test_id, current_student.user_id, answers, part_by_task)
+    snapshotted = sum(1 for a in answers if (a.answer_text or "").strip())
+    for ans in answers:
+        db.delete(ans)
+    db.commit()
+    return {
+        "message": "Previous attempt saved to history; ready for a new attempt.",
+        "test_id": test_id,
+        "attempt_number": attempt_number,
+        "snapshotted": snapshotted,
+    }
+
+
+@router.post("/writing/test/{test_id}/finalize", response_model=dict)
+async def finalize_writing_test(
+    test_id: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """End review → lock the graded essay(s) of this test into history. After this the
+    user can't AI-grade/edit them (must 'Retake' for a new attempt)."""
+    task_ids = [t.task_id for t in db.query(WritingTask).filter(WritingTask.test_id == test_id).all()]
+    if not task_ids:
+        raise HTTPException(status_code=404, detail="No writing tasks found for this test")
+    locked = 0
+    for ans in db.query(WritingAnswer).filter(
+        WritingAnswer.task_id.in_(task_ids),
+        WritingAnswer.user_id == current_student.user_id,
+    ).all():
+        if ans.is_ai_evaluated and not ans.locked:
+            ans.locked = True
+            locked += 1
+    db.commit()
+    return {"test_id": test_id, "locked": locked}
+
+
+@router.get("/writing/test/{test_id}/attempts", response_model=List[dict])
+async def get_writing_attempts(
+    test_id: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Past Writing attempts (versions) for this test — for the History dropdown."""
+    rows = db.query(WritingAttempt).filter(
+        WritingAttempt.test_id == test_id,
+        WritingAttempt.user_id == current_student.user_id,
+    ).order_by(WritingAttempt.attempt_number.desc(), WritingAttempt.part_number).all()
+    by_num = {}
+    for a in rows:
+        by_num.setdefault(a.attempt_number, []).append(a)
+    out = []
+    for num in sorted(by_num.keys(), reverse=True):
+        parts = by_num[num]
+        overall = _writing_overall({p.part_number: p.score for p in parts})
+        latest = max((p.created_at for p in parts if p.created_at), default=None)
+        out.append({
+            "attempt_number": num,
+            "overall_band": overall,
+            "created_at": latest,
+            "parts": [{"part_number": p.part_number, "band": p.score,
+                       "is_ai_evaluated": bool(p.is_ai_evaluated)}
+                      for p in sorted(parts, key=lambda x: x.part_number or 0)],
+        })
+    return out
+
+
+@router.get("/writing/forecast-history/{exam_id}/{part_number}", response_model=List[dict])
+async def get_writing_forecast_history(
+    exam_id: int, part_number: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Past Writing attempts for one forecast part (a single task) — for the History
+    dropdown on the forecast cards."""
+    rows = db.query(WritingAttempt).filter(
+        WritingAttempt.test_id == exam_id,
+        WritingAttempt.part_number == part_number,
+        WritingAttempt.user_id == current_student.user_id,
+    ).order_by(WritingAttempt.attempt_number.desc()).all()
+    return [{
+        "attempt_number": r.attempt_number,
+        "band": r.score,
+        "created_at": r.created_at,
+        "is_ai_evaluated": bool(r.is_ai_evaluated),
+    } for r in rows]
+
+
+@router.get("/writing/test/{test_id}/attempt/{attempt_number}/answers", response_model=dict)
+async def get_writing_attempt_answers(
+    test_id: int, attempt_number: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """A past attempt snapshot in the same shape as /answers (+ the stored grade blob)
+    so the review screen can show it read-only."""
+    rows = db.query(WritingAttempt).filter(
+        WritingAttempt.test_id == test_id,
+        WritingAttempt.user_id == current_student.user_id,
+        WritingAttempt.attempt_number == attempt_number,
+    ).order_by(WritingAttempt.part_number).all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    task_ids = [r.task_id for r in rows]
+    tasks = {t.task_id: t for t in db.query(WritingTask).filter(WritingTask.task_id.in_(task_ids)).all()}
+    parts = []
+    for r in rows:
+        t = tasks.get(r.task_id)
+        parts.append({
+            "task_id": r.task_id,
+            "part_number": r.part_number,
+            "task_type": t.task_type if t else None,
+            "instructions": t.instructions if t else None,
+            "word_limit": t.word_limit if t else None,
+            "answer": {"answer_text": r.answer_text, "score": r.score, "time_taken": r.time_taken},
+            "result": r.result,
+            "generated": r.ai_generated,
+        })
+    return {"test_id": test_id, "attempt_number": attempt_number, "is_attempt": True, "parts": parts}
+
+
+@router.get("/writing/part/{task_id}/essay", response_model=dict)
+async def get_writing_part_essay(
+    task_id: int,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    task = db.query(WritingTask).filter(WritingTask.task_id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Writing task not found")
+    answer = db.query(WritingAnswer).filter(
+        WritingAnswer.task_id == task_id,
+        WritingAnswer.user_id == current_student.user_id
+    ).first()
+    test = db.query(Exam).filter(Exam.exam_id == task.test_id).first()
+    return {
+        "test_id": task.test_id,
+        "test_title": test.title if test else None,
+        "task_id": task.task_id,
+        "part_number": task.part_number,
+        "task_type": task.task_type,
+        "instructions": task.instructions,
+        "word_limit": task.word_limit,
+        "essay": {
+            "answer_text": answer.answer_text,
+            "score": answer.score,
+            "created_at": answer.created_at,
+            "updated_at": answer.updated_at
+        } if answer else None
+    }
+
+
+@router.put("/writing/part/{task_id}/essay", response_model=dict)
+async def update_writing_part_essay(
+    task_id: int,
+    answer_data: WritingAnswerSubmit,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Save one part's essay (used by the single-part forecast room on submit).
+
+    Global adaptation: if the existing answer was already AI-graded or locked, this
+    submit is a retake of that part — snapshot the old answer into writing_attempts
+    first (so it shows in the forecast History) and start a fresh, ungraded answer.
+    VN overwrote the text in place, leaving a stale grade/lock on the new essay."""
+    task = db.query(WritingTask).filter(WritingTask.task_id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Writing task not found")
+
+    now = get_vietnam_time().replace(tzinfo=None)
+    writing_answer = db.query(WritingAnswer).filter(
+        WritingAnswer.task_id == task_id,
+        WritingAnswer.user_id == current_student.user_id
+    ).first()
+
+    if writing_answer and (writing_answer.is_ai_evaluated or writing_answer.locked):
+        _snapshot_writing_answers(db, task.test_id, current_student.user_id,
+                                  [writing_answer], {task.task_id: task.part_number})
+        db.delete(writing_answer)
+        db.flush()
+        writing_answer = None
+
+    if writing_answer:
+        writing_answer.answer_text = answer_data.answer_text
+        if answer_data.time_taken is not None:
+            writing_answer.time_taken = answer_data.time_taken
+        writing_answer.updated_at = now
+    else:
+        writing_answer = WritingAnswer(
+            task_id=task_id,
+            user_id=current_student.user_id,
+            answer_text=answer_data.answer_text,
+            score=0,
+            time_taken=answer_data.time_taken,
+            created_at=now,
+            updated_at=now
+        )
+        db.add(writing_answer)
+
+    db.commit()
+    return {
+        "message": "Essay updated successfully",
+        "task_id": task_id,
+        "part_number": task.part_number,
+        "word_count": len(answer_data.answer_text.split()),
+        "answer_text": writing_answer.answer_text,
+        "updated_at": writing_answer.updated_at
+    }
+
+
+@router.post("/writing/tasks/{task_id}/submit", response_model=dict)
+async def submit_writing_task_answer(
+    task_id: int,
+    answer_data: WritingAnswerSubmit,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """VN alias of /writing/tasks/{task_id}/save-draft (same behaviour)."""
+    return await submit_writing_answer(task_id, answer_data, current_student, db)
 
