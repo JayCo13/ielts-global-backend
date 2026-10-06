@@ -39,6 +39,8 @@ from .student.speaking_analysis import router as speaking_analysis_router
 from .student.speaking_practice import router as speaking_practice_router
 from .student.speaking_lessons import router as speaking_lessons_router
 from .admin.speaking_admin import router as speaking_admin_router
+from .admin.listening_alignment_admin import router as listening_alignment_admin_router
+from .student.audio_cues_routes import router as audio_cues_router
 
 router = APIRouter()
 
@@ -101,3 +103,6 @@ router.include_router(speaking_analysis_router, prefix="/student", tags=["speaki
 router.include_router(speaking_practice_router, prefix="/student", tags=["speaking-practice"])
 router.include_router(speaking_lessons_router, prefix="/student", tags=["speaking-lessons"])
 router.include_router(speaking_admin_router, prefix="/admin", tags=["admin-speaking"])
+# Listening audio timestamps: admin alignment/cue pins + student per-question replay cues.
+router.include_router(listening_alignment_admin_router, prefix="/admin", tags=["admin-listening-alignment"])
+router.include_router(audio_cues_router, prefix="/student", tags=["student-audio-cues"])

@@ -2,7 +2,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.models import Exam, ExamSection, Question, QuestionOption, ReadingPassage, WritingAnswer, QuestionGroup, ListeningMedia, WritingTask, User, ExamResult, PackageTransaction, StudentAnswer, VIPPackage, VIPSubscription, ExamAccessType, AdminNotificationRead, SpeakingMaterial, SpeakingMaterialAccessType
+from app.models.models import Exam, ExamSection, Question, QuestionOption, ReadingPassage, WritingAnswer, QuestionGroup, ListeningMedia, WritingTask, User, ExamResult, PackageTransaction, StudentAnswer, VIPPackage, VIPSubscription, ExamAccessType, AdminNotificationRead, SpeakingMaterial, SpeakingMaterialAccessType, ListeningCueOverride, ListeningAlignment
 from app.routes.admin.auth import get_current_admin
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
@@ -113,6 +113,18 @@ def upsert_listening_questions(db: Session, section_id: int, payloads: List[Dict
         .all()
     )
 
+    # Hand-timed audio cues hang off question_id with ON DELETE CASCADE, so any row we
+    # cannot reuse takes the admin's pins down with it. Reused rows keep theirs
+    # untouched; for the rest the payload still names the question each row came from,
+    # so a pin can be re-attached to its replacement precisely rather than by position.
+    # Plain values, not ORM rows: the cascade deletes those rows out from under the
+    # session, and touching a deleted instance afterwards raises.
+    pins = {
+        pin.question_id: (pin.start_time, pin.end_time, pin.updated_by, pin.updated_at)
+        for pin in db.query(ListeningCueOverride).filter(
+            ListeningCueOverride.section_id == section_id).all()
+    }
+
     reused = 0
     for i, data in enumerate(payloads):
         if i >= len(existing):
@@ -141,6 +153,19 @@ def upsert_listening_questions(db: Session, section_id: int, payloads: List[Dict
             question = Question(section_id=section_id, **fields)
         db.add(question)
         db.flush()
+
+        old_id = data.get('question_id')
+        pin = pins.get(old_id) if old_id else None
+        if pin is not None and question.question_id != old_id:
+            start_time, end_time, updated_by, updated_at = pin
+            db.add(ListeningCueOverride(
+                question_id=question.question_id,
+                section_id=section_id,
+                start_time=start_time,
+                end_time=end_time,
+                updated_by=updated_by,
+                updated_at=updated_at,
+            ))
 
         # Options carry no student data, so they are always replaced wholesale.
         db.query(QuestionOption).filter(
@@ -1324,6 +1349,9 @@ async def update_listening_part_with_audio(
     # Replace the media row; questions are upserted below so past answers keep
     # their question_id (see upsert_listening_questions).
     db.query(ListeningMedia).filter(ListeningMedia.section_id == section.section_id).delete()
+    # New audio: the stored word timings belong to the old file. The R2 URL can stay
+    # the same on re-upload, so the fingerprint alone wouldn't notice — drop the row.
+    db.query(ListeningAlignment).filter(ListeningAlignment.section_id == section.section_id).delete()
 
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
@@ -1460,6 +1488,9 @@ async def update_listening_part(
     # Replace the media row; questions are upserted below so past answers keep
     # their question_id (see upsert_listening_questions).
     db.query(ListeningMedia).filter(ListeningMedia.section_id == section.section_id).delete()
+    # New audio: the stored word timings belong to the old file. The R2 URL can stay
+    # the same on re-upload, so the fingerprint alone wouldn't notice — drop the row.
+    db.query(ListeningAlignment).filter(ListeningAlignment.section_id == section.section_id).delete()
 
     # Parse transcript to extract question contexts
     soup = BeautifulSoup(transcript, 'html.parser')
