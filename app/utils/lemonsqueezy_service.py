@@ -90,12 +90,12 @@ def create_checkout(
                     "enabled_variants": [int(variant_id)],
                     "redirect_url": os.getenv(
                         "FRONTEND_URL",
-                        "https://ieltscomputertest.com"
+                        "https://englishoncomputer.com"
                     ) + "/my-vip-package",
                     "receipt_button_text": "Go to My VIP Package",
                     "receipt_link_url": os.getenv(
                         "FRONTEND_URL",
-                        "https://ieltscomputertest.com"
+                        "https://englishoncomputer.com"
                     ) + "/my-vip-package",
                 },
             },

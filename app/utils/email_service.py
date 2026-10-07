@@ -7,7 +7,7 @@ quota of the transactional account used by password reset / verification
 
 Required env vars:
   SES_REGION            e.g. ap-southeast-1
-  SES_FROM_EMAIL        e.g. news@ieltscomputertest.com  (must be verified in SES)
+  SES_FROM_EMAIL        e.g. news@englishoncomputer.com  (must be verified in SES)
   AWS_ACCESS_KEY_ID     IAM user with ses:SendEmail permission
   AWS_SECRET_ACCESS_KEY
 
