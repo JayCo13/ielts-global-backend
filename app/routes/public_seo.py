@@ -433,7 +433,7 @@ _SEO_VIP_MODAL = """
       <button class="x" type="button" onclick="closeVip()" aria-label="Close">&times;</button>
       <div class="ic"><svg width="34" height="34" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 20h14a1 1 0 0 0 1-1.21L18.2 9l-4 3.1L12 5.6 9.8 12.1l-4-3.1L4 18.79A1 1 0 0 0 5 20z"/></svg></div>
       <h3 id="vipt">This test is for VIP accounts</h3>
-      <p>Sorry, this practice test is currently available to VIP accounts only. Try our free tests now &mdash; or, if you're preparing for the exam and want our premium forecast sets, subscribe to VIP.</p>
+      <p>Sorry, this practice test is currently available to VIP accounts only. Try our free tests now &mdash; or, if you're preparing for the exam and want our premium focus sets, subscribe to VIP.</p>
       <div class="row">
         <a class="btn-vip" href="__VIP_LINK__">Subscribe to VIP</a>
         <a class="btn-free" href="__APP_LINK__">Try free tests</a>
@@ -470,13 +470,13 @@ def _seo_hero(app_link, crumb_inner, badge_text, h1_html, lead_html, chips_html,
     """Full immersive dark hero: brand nav, breadcrumb, badge, title, lead,
     feature chips, CTA, and an SVG wave dividing into the light content below.
     Page-specific HTML is passed in pre-built/escaped."""
-    logo = f"{SEO_APP_URL}/img/logo-ielts.png"
+    logo = f"{SEO_APP_URL}/img/logo-eoc-icon.png"
     return (
         '  <header class="hero">\n'
         '    <nav class="nav">'
         f'<a class="brand" href="{SEO_APP_URL}">'
-        f'<img src="{logo}" alt="englishoncomputer.com logo" width="62" height="62">'
-        '<span class="brand-tx">IELTS<b>Computer</b>Test</span></a>'
+        f'<img src="{logo}" alt="EnglishOnComputer logo" width="62" height="62">'
+        '<span class="brand-tx">English<b>On</b>Computer</span></a>'
         f'<a class="nav-cta" href="{html_lib.escape(app_link)}">Practice now &rarr;</a>'
         '</nav>\n'
         '    <div class="hero-in">\n'
@@ -494,11 +494,11 @@ def _seo_hero(app_link, crumb_inner, badge_text, h1_html, lead_html, chips_html,
 
 
 def _seo_footer():
-    logo = f"{SEO_APP_URL}/img/logo-ielts.png"
+    logo = f"{SEO_APP_URL}/img/logo-eoc-icon.png"
     return (
         '  <footer class="ft"><div class="ft-in">'
-        f'<img src="{logo}" alt="englishoncomputer.com" width="38" height="38">'
-        '<span>&copy; englishoncomputer.com &mdash; IELTS computer-based practice on a 100% real exam interface</span>'
+        f'<img src="{logo}" alt="EnglishOnComputer" width="38" height="38">'
+        '<span>&copy; 2026 EnglishOnComputer &mdash; online English learning with practical lessons and AI-powered tools</span>'
         '</div></footer>'
     )
 
@@ -554,14 +554,14 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
         return HTMLResponse(_seo_not_found(), status_code=404)
 
     skill_label = skill.capitalize()
-    exam_title = _seo_clean(exam.title) or f"IELTS {skill_label} Test"
+    exam_title = _seo_clean(exam.title) or f"English {skill_label} Test"
     base = _seo_base(request)
     canonical = f"{base}/public/t/{skill}/{exam_id}/{_seo_slugify(exam.title)}"
     part_titles = [t for _n, t in parts]
-    title_tag = f"{exam_title} — IELTS {skill_label} Computer Test | englishoncomputer.com"
+    title_tag = f"{exam_title} — English {skill_label} Practice Test | EnglishOnComputer"
     description = (
-        f"{exam_title}: practice IELTS {skill_label} on the computer test. "
-        f"Parts: {', '.join(part_titles)}. Free practice on a 100% real exam "
+        f"{exam_title}: practice English {skill_label} on the computer. "
+        f"Parts: {', '.join(part_titles)}. Free practice on a realistic computer-based "
         f"interface at englishoncomputer.com."
     )[:300]
 
@@ -587,15 +587,15 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
         "@type": "LearningResource",
         "name": exam_title,
         "url": canonical,
-        "learningResourceType": "IELTS practice test",
-        "educationalLevel": "IELTS",
+        "learningResourceType": "English practice test",
+        "educationalLevel": "English learners",
         "inLanguage": "en",
-        "about": f"IELTS {skill_label}",
+        "about": f"English {skill_label}",
         "teaches": part_titles,
         "isAccessibleForFree": is_free,
         "provider": {
             "@type": "EducationalOrganization",
-            "name": "englishoncomputer.com",
+            "name": "EnglishOnComputer",
             "url": SEO_APP_URL,
         },
     }, ensure_ascii=False)
@@ -605,14 +605,14 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
     cta_html, modal_html = _seo_cta_block(
         is_free, app_link, vip_link, "Start practicing on englishoncomputer.com")
     crumb_inner = (
-        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a>'
+        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">English {skill_label}</a>'
         f' / {html_lib.escape(exam_title)}'
     )
     lead_html = (
-        f'Practice <strong>{html_lib.escape(exam_title)}</strong> for the IELTS '
-        f'{skill_label} section on a 100% real computer-based exam interface.'
+        f'Practice <strong>{html_lib.escape(exam_title)}</strong> to improve your English '
+        f'{skill_label} skills on a realistic computer-based interface.'
     )
-    hero = _seo_hero(app_link, crumb_inner, f"IELTS {skill_label} &middot; Computer Test",
+    hero = _seo_hero(app_link, crumb_inner, f"English {skill_label} &middot; Practice Test",
                      html_lib.escape(exam_title), lead_html, "", cta_html)
     footer = _seo_footer()
     page = f"""<!doctype html>
@@ -628,8 +628,8 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
   <meta property="og:title" content="{html_lib.escape(title_tag)}">
   <meta property="og:description" content="{html_lib.escape(description)}">
   <meta property="og:url" content="{html_lib.escape(canonical)}">
-  <meta property="og:site_name" content="englishoncomputer.com">
-  <meta property="og:image" content="{SEO_APP_URL}/img/logo-ielts.png">
+  <meta property="og:site_name" content="EnglishOnComputer">
+  <meta property="og:image" content="{SEO_APP_URL}/img/og-eoc.jpg">
   <script type="application/ld+json">{json_ld}</script>
   <style>{_SEO_CSS}</style>
 </head>
@@ -640,7 +640,7 @@ async def seo_test_page(skill: str, exam_id: int, request: Request, slug: str = 
     <ul class="parts">
 {parts_html}
     </ul>
-    <h2 class="sec">More IELTS {skill_label} tests</h2>
+    <h2 class="sec">More English {skill_label} tests</h2>
     <ul class="parts">
 {others_html}
     </ul>
@@ -672,16 +672,16 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
 
     skill_label = skill.capitalize()
     part_title = _seo_clean(sec.part_title)
-    exam_title = _seo_clean(exam.title) or f"IELTS {skill_label} Test"
+    exam_title = _seo_clean(exam.title) or f"English {skill_label} Test"
     base = _seo_base(request)
     canonical = f"{base}/public/p/{skill}/{section_id}/{_seo_slugify(part_title)}"
     qtypes = [q for q in (sec.question_types or []) if isinstance(q, str)]
-    title_tag = f"{part_title} — IELTS {skill_label} Practice | englishoncomputer.com"
+    title_tag = f"{part_title} — English {skill_label} Practice | EnglishOnComputer"
     description = (
         f"Practice \"{part_title}\" — Part {sec.order_number} of {exam_title}, "
-        f"IELTS {skill_label} computer test. "
+        f"English {skill_label} practice test. "
         + (f"Question types: {', '.join(qtypes)}. " if qtypes else "")
-        + "Free practice on a 100% real exam interface at englishoncomputer.com."
+        + "Free practice on a realistic computer-based interface at englishoncomputer.com."
     )[:300]
 
     # sibling parts of the same exam (internal links)
@@ -706,15 +706,15 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
         "@type": "LearningResource",
         "name": part_title,
         "url": canonical,
-        "learningResourceType": "IELTS practice test part",
-        "educationalLevel": "IELTS",
+        "learningResourceType": "English practice test part",
+        "educationalLevel": "English learners",
         "inLanguage": "en",
-        "about": f"IELTS {skill_label}",
+        "about": f"English {skill_label}",
         "isPartOf": exam_title,
         "isAccessibleForFree": is_free,
         "provider": {
             "@type": "EducationalOrganization",
-            "name": "englishoncomputer.com",
+            "name": "EnglishOnComputer",
             "url": SEO_APP_URL,
         },
     }, ensure_ascii=False)
@@ -724,16 +724,16 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
     cta_html, modal_html = _seo_cta_block(
         is_free, app_link, vip_link, "Start practicing on englishoncomputer.com")
     crumb_inner = (
-        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">IELTS {skill_label}</a>'
+        f'<a href="{SEO_APP_URL}">Home</a> / <a href="{app_link}">English {skill_label}</a>'
         f' / <a href="{exam_link}">{html_lib.escape(exam_title)}</a> / Part {sec.order_number}'
     )
     lead_html = (
         f'<strong>{html_lib.escape(part_title)}</strong> is Part {sec.order_number} of '
-        f'<a href="{exam_link}">{html_lib.escape(exam_title)}</a> &mdash; IELTS {skill_label} '
-        f'on the computer-based test. Practice it on a 100% real exam interface.'
+        f'<a href="{exam_link}">{html_lib.escape(exam_title)}</a> &mdash; English {skill_label} '
+        f'on the computer-based test. Practice it on a realistic computer-based interface.'
     )
     hero = _seo_hero(app_link, crumb_inner,
-                     f"IELTS {skill_label} &middot; Part {sec.order_number}",
+                     f"English {skill_label} &middot; Part {sec.order_number}",
                      html_lib.escape(part_title), lead_html, chips_html, cta_html)
     footer = _seo_footer()
     page = f"""<!doctype html>
@@ -749,8 +749,8 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
   <meta property="og:title" content="{html_lib.escape(title_tag)}">
   <meta property="og:description" content="{html_lib.escape(description)}">
   <meta property="og:url" content="{html_lib.escape(canonical)}">
-  <meta property="og:site_name" content="englishoncomputer.com">
-  <meta property="og:image" content="{SEO_APP_URL}/img/logo-ielts.png">
+  <meta property="og:site_name" content="EnglishOnComputer">
+  <meta property="og:image" content="{SEO_APP_URL}/img/og-eoc.jpg">
   <script type="application/ld+json">{json_ld}</script>
   <style>{_SEO_CSS}</style>
 </head>

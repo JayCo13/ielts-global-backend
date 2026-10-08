@@ -15,7 +15,7 @@ EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_USERNAME = os.getenv("EMAIL_USERNAME")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_FROM = os.getenv("EMAIL_FROM")
-SITE_NAME = os.getenv("SITE_NAME", "IELTS Practice")
+SITE_NAME = os.getenv("SITE_NAME", "EnglishOnComputer")
 
 # Print debug information
 print(f"Email Configuration Debug:")
@@ -162,7 +162,7 @@ def send_account_created_email(to_email: str, username: str, frontend_url: str) 
             <h2 style="color: #4a86e8;">Welcome to {SITE_NAME}!</h2>
             <p>Hello {username},</p>
             <p>We are pleased to inform you that your {SITE_NAME} account has been successfully created.</p>
-            <p>You can log in now to access all of our IELTS practice resources.</p>
+            <p>You can log in now to access all of our English practice resources.</p>
             <p>
                 <a href="{login_link}" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
                     Log In Now

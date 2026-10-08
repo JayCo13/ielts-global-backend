@@ -10,8 +10,8 @@ complaint can't drag down OTP / password-reset deliverability.
 
 Env:
   RESEND_API_KEY          re_...  (enables Resend for both paths)
-  RESEND_FROM             transactional From, e.g. "IELTS Computer Test <noreply@englishoncomputer.com>"
-  RESEND_MARKETING_FROM   marketing From,      e.g. "IELTS Computer Test <news@englishoncomputer.com>"
+  RESEND_FROM             transactional From, e.g. "EnglishOnComputer <noreply@englishoncomputer.com>"
+  RESEND_MARKETING_FROM   marketing From,      e.g. "EnglishOnComputer <news@englishoncomputer.com>"
 """
 import os
 import logging
@@ -35,8 +35,8 @@ RESEND_API_URL = "https://api.resend.com/emails"
 _SEND_DEADLINE = 20.0                       # seconds of re-dialling before giving up
 _SEND_TIMEOUT = (4, 15)                     # (connect, read)
 
-DEFAULT_FROM = "IELTS Computer Test <noreply@englishoncomputer.com>"
-DEFAULT_MARKETING_FROM = "IELTS Computer Test <news@englishoncomputer.com>"
+DEFAULT_FROM = "EnglishOnComputer <noreply@englishoncomputer.com>"
+DEFAULT_MARKETING_FROM = "EnglishOnComputer <news@englishoncomputer.com>"
 
 
 def resend_configured() -> bool:

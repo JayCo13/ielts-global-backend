@@ -79,7 +79,7 @@ if not SECRET_KEY:
     SECRET_KEY = secrets.token_urlsafe(64)
     print("⚠️  SECRET_KEY env var not set — using a temporary random key. "
           "Set SECRET_KEY in the environment for stable, secure sessions.")
-SITE_NAME = os.getenv("SITE_NAME", "Ielts Computer Test")
+SITE_NAME = os.getenv("SITE_NAME", "EnglishOnComputer")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 90
 
@@ -1111,7 +1111,7 @@ async def register_student(student_data: StudentCreate, db: Session = Depends(ge
                     <h2 style="color: #4a86e8;">Welcome to {SITE_NAME}!</h2>
                     <p>Hello {new_student.username},</p>
                     <p>We are pleased to inform you that your {SITE_NAME} account has been successfully created.</p>
-                    <p>You can log in now to access all of our IELTS practice resources.</p>
+                    <p>You can log in now to access all of our English practice resources.</p>
                     <p>
                         <a href="{frontend_url}/login" style="display: inline-block; padding: 10px 20px; background-color: #4a86e8; color: white; text-decoration: none; border-radius: 5px;">
                             Log In Now

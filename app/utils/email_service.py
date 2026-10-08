@@ -11,7 +11,7 @@ Required env vars:
   AWS_ACCESS_KEY_ID     IAM user with ses:SendEmail permission
   AWS_SECRET_ACCESS_KEY
 
-The display name in the From header defaults to "IELTS Computer Test" (SES_FROM_NAME).
+The display name in the From header defaults to "EnglishOnComputer" (SES_FROM_NAME).
 """
 import os
 import logging
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 SES_REGION = os.getenv("SES_REGION", "ap-southeast-1")
 SES_FROM_EMAIL = os.getenv("SES_FROM_EMAIL", "")
-SES_FROM_NAME = os.getenv("SES_FROM_NAME", "IELTS Computer Test")
+SES_FROM_NAME = os.getenv("SES_FROM_NAME", "EnglishOnComputer")
 
 
 def _get_ses_client():
