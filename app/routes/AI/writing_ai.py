@@ -50,10 +50,9 @@ def _ai_http_error(e) -> HTTPException:
     logger.warning("Writing AI (Gemini) error: %s", e)
     return HTTPException(status_code=503, detail="The AI service is temporarily unavailable. Please try again later.")
 
-# GLOBAL: free users previously had 1 full-test + 2 forecast AI evaluations per day
-# (client-side counters). The server-side unified daily allowance is 3 so nobody gets
-# fewer evaluations than before. VN uses 2.
-FREE_DAILY = 3
+# Free allowance: 2 AI evaluations per day (same as VN; set by the product owner in the
+# 2026-10 brief — the UI shows "2/2" and the VIP page says "Writing 2 AI/day").
+FREE_DAILY = 2
 # GLOBAL: every global user (free or VIP) previously received full feedback (mistakes,
 # suggestions, rewritten essay) from the Groq evaluator, so the detailed breakdown stays
 # available to free users too. VN shows free users the overview only — set this to False
