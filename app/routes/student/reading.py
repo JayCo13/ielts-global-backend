@@ -668,17 +668,22 @@ async def get_reading_forecasts(
         ).group_by(Question.section_id).all()
         expected_map = {sid: cnt for sid, cnt in expected_rows}
 
-        res_ids = [r.result_id for r in db.query(ExamResult.result_id).filter(
+        # Results with their date, so the latest attempt per part can be picked (VN port).
+        user_results = db.query(ExamResult.result_id, ExamResult.completion_date).filter(
             ExamResult.user_id == current_student.user_id,
             ExamResult.exam_id == exam.exam_id
-        ).all()]
+        ).all()
+        res_ids = [r[0] for r in user_results]
+        res_date = {r[0]: r[1] for r in user_results}
 
         attempts_by_section = {}
+        earned_by_rs = {}   # (result_id, section_id) -> correct answers in that part
         if res_ids:
             rows = db.query(
                 StudentAnswer.result_id,
                 Question.section_id,
-                func.count(StudentAnswer.answer_id).label('cnt')
+                func.count(StudentAnswer.answer_id).label('cnt'),
+                func.coalesce(func.sum(StudentAnswer.score), 0).label('earned')
             ).join(Question, StudentAnswer.question_id == Question.question_id)\
              .filter(
                 StudentAnswer.result_id.in_(res_ids),
@@ -686,19 +691,28 @@ async def get_reading_forecasts(
              )\
              .group_by(StudentAnswer.result_id, Question.section_id)\
              .all()
-            for rid, sid, cnt in rows:
+            for rid, sid, cnt, earned in rows:
                 attempts_by_section.setdefault(sid, []).append((rid, cnt))
+                earned_by_rs[(rid, sid)] = int(earned or 0)
 
         forecast_parts = []
         for s in forecast_sections:
             expected = expected_map.get(s.section_id, 0)
             candidates = attempts_by_section.get(s.section_id, [])
-            attempts_count = sum(1 for _, cnt in candidates if cnt == expected)
+            complete = [(rid, cnt) for rid, cnt in candidates if cnt == expected]
+            attempts_count = len(complete)
+            # Latest completed attempt's score -> "Correct x/y" on the list card (VN port).
+            latest_score = None
+            if complete:
+                latest_rid = max(complete, key=lambda rc: (res_date.get(rc[0]) or datetime.min))[0]
+                latest_score = earned_by_rs.get((latest_rid, s.section_id), 0)
             forecast_parts.append({
                 'part_number': s.order_number,
                 'forecast_title': getattr(s, 'forecast_title', None),
                 'completed': attempts_count > 0,
                 'attempts_count': attempts_count,
+                'latest_score': latest_score,
+                'total_questions': expected,
                 'is_recommended': bool(getattr(s, 'is_recommended', False)),
                 'question_types': getattr(s, 'question_types', None) or [],
                 'question_type_tags': s.question_type_tags or [],

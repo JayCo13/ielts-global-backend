@@ -39,6 +39,9 @@ async def get_public_listening_tests(db: Session = Depends(get_db)):
             continue
         first_section = sections[0]
         part_titles = {s.order_number: s.part_title for s in sections if s.part_title}
+        # Same per-part badges the logged-in list shows (difficulty + Important Level).
+        part_difficulty = {s.order_number: s.difficulty_label for s in sections if s.difficulty_label}
+        part_forecast_level = {s.order_number: s.forecast_level for s in sections if s.forecast_level}
         
         result.append({
             "exam_id": exam.exam_id,
@@ -48,7 +51,9 @@ async def get_public_listening_tests(db: Session = Depends(get_db)):
             "total_marks": first_section.total_marks,
             "is_completed": False,
             "total_score": 0,
-            "part_titles": part_titles
+            "part_titles": part_titles,
+            "part_difficulty": part_difficulty,
+            "part_forecast_level": part_forecast_level
         })
     return result
 
@@ -79,6 +84,9 @@ async def get_public_reading_tests(db: Session = Depends(get_db)):
             continue
         first_section = sections[0]
         part_titles = {s.order_number: s.part_title for s in sections if s.part_title}
+        # Same per-part badges the logged-in list shows (difficulty + Important Level).
+        part_difficulty = {s.order_number: s.difficulty_label for s in sections if s.difficulty_label}
+        part_forecast_level = {s.order_number: s.forecast_level for s in sections if s.forecast_level}
         
         result.append({
             "exam_id": exam.exam_id,
@@ -88,7 +96,9 @@ async def get_public_reading_tests(db: Session = Depends(get_db)):
             "total_marks": first_section.total_marks,
             "is_completed": False,
             "total_score": 0,
-            "part_titles": part_titles
+            "part_titles": part_titles,
+            "part_difficulty": part_difficulty,
+            "part_forecast_level": part_forecast_level
         })
     return result
 
@@ -139,7 +149,9 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
                 "task2_type": t.task2_type,
                 "instructions": "",
                 "word_limit": t.word_limit,
-                "is_recommended": bool(getattr(t, 'is_recommended', False))
+                "is_recommended": bool(getattr(t, 'is_recommended', False)),
+                "difficulty_label": t.difficulty_label,
+                "forecast_level": t.forecast_level
             } for t in forecast_tasks]
         })
 
@@ -176,7 +188,9 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
                 "completed": False,
                 "attempts_count": 0,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or []
+                "question_types": getattr(s, 'question_types', None) or [],
+                "difficulty_label": s.difficulty_label,
+                "forecast_level": s.forecast_level
             })
 
         result.append({
@@ -212,7 +226,9 @@ async def get_public_reading_forecasts(db: Session = Depends(get_db)):
                 "completed": False,
                 "attempts_count": 0,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or []
+                "question_types": getattr(s, 'question_types', None) or [],
+                "difficulty_label": s.difficulty_label,
+                "forecast_level": s.forecast_level
             })
 
         result.append({

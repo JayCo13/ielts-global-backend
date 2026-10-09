@@ -750,14 +750,20 @@ async def get_writing_forecasts(
 
     # VN port: this user's AI band per forecast task (shown on each Part card).
     band_by_task = {}
+    # Tasks this user has a current (not yet retaken) essay for, graded or not. Lets the
+    # card offer History -> review for an essay that was submitted but never graded.
+    answered_task_ids = set()
     forecast_task_ids = [t.task_id for t in all_forecast_tasks]
     if forecast_task_ids:
-        for ans in db.query(WritingAnswer).filter(
+        for task_id, score, is_ai_evaluated in db.query(
+            WritingAnswer.task_id, WritingAnswer.score, WritingAnswer.is_ai_evaluated
+        ).filter(
             WritingAnswer.task_id.in_(forecast_task_ids),
             WritingAnswer.user_id == current_student.user_id,
-            WritingAnswer.is_ai_evaluated == True,  # noqa: E712
         ).all():
-            band_by_task[ans.task_id] = ans.score
+            answered_task_ids.add(task_id)
+            if is_ai_evaluated:
+                band_by_task[task_id] = score
 
     # Build response using pre-loaded data
     result = []
@@ -798,6 +804,7 @@ async def get_writing_forecasts(
                 "forecast_level": t.forecast_level,
                 "occurrence_count": t.occurrence_count or 0,
                 "band": band_by_task.get(t.task_id),
+                "has_answer": t.task_id in answered_task_ids,
             } for t in forecast_tasks]
         })
 
@@ -854,17 +861,22 @@ async def get_listening_forecasts(
         ).group_by(Question.section_id).all()
         expected_map = {sid: cnt for sid, cnt in expected_map_rows}
 
-        res_ids = [r.result_id for r in db.query(ExamResult.result_id).filter(
+        # Results with their date, so the latest attempt per part can be picked (VN port).
+        user_results = db.query(ExamResult.result_id, ExamResult.completion_date).filter(
             ExamResult.user_id == current_student.user_id,
             ExamResult.exam_id == exam.exam_id
-        ).all()]
+        ).all()
+        res_ids = [r[0] for r in user_results]
+        res_date = {r[0]: r[1] for r in user_results}
 
         attempts_by_section = {}
+        earned_by_rs = {}   # (result_id, section_id) -> correct answers in that part
         if res_ids:
             rows_listen = db.query(
                 ListeningAnswer.result_id,
                 Question.section_id,
-                func.count(ListeningAnswer.answer_id).label('cnt')
+                func.count(ListeningAnswer.answer_id).label('cnt'),
+                func.coalesce(func.sum(ListeningAnswer.score), 0).label('earned')
             ).join(Question, ListeningAnswer.question_id == Question.question_id)\
              .filter(
                 ListeningAnswer.result_id.in_(res_ids),
@@ -878,7 +890,8 @@ async def get_listening_forecasts(
                 rows_student = db.query(
                     StudentAnswer.result_id,
                     Question.section_id,
-                    func.count(StudentAnswer.answer_id).label('cnt')
+                    func.count(StudentAnswer.answer_id).label('cnt'),
+                    func.coalesce(func.sum(StudentAnswer.score), 0).label('earned')
                 ).join(Question, StudentAnswer.question_id == Question.question_id)\
                  .filter(
                     StudentAnswer.result_id.in_(res_ids),
@@ -888,19 +901,28 @@ async def get_listening_forecasts(
                  .all()
                 rows = rows_student
 
-            for rid, sid, cnt in rows:
+            for rid, sid, cnt, earned in rows:
                 attempts_by_section.setdefault(sid, []).append((rid, cnt))
+                earned_by_rs[(rid, sid)] = int(earned or 0)
 
         forecast_parts = []
         for s in forecast_sections:
             expected = expected_map.get(s.section_id, 0)
             candidates = attempts_by_section.get(s.section_id, [])
-            attempts_count = sum(1 for _, cnt in candidates if cnt > 0)
+            complete = [(rid, cnt) for rid, cnt in candidates if cnt > 0]
+            attempts_count = len(complete)
+            # Latest attempt's score -> "Correct x/y" on the list card (VN port).
+            latest_score = None
+            if complete:
+                latest_rid = max(complete, key=lambda rc: (res_date.get(rc[0]) or datetime.min))[0]
+                latest_score = earned_by_rs.get((latest_rid, s.section_id), 0)
             forecast_parts.append({
                 "part_number": s.order_number,
                 "forecast_title": getattr(s, 'forecast_title', None),
                 "completed": attempts_count > 0,
                 "attempts_count": attempts_count,
+                "latest_score": latest_score,
+                "total_questions": expected,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
                 "question_types": getattr(s, 'question_types', None) or [],
                 "question_type_tags": s.question_type_tags or [],
