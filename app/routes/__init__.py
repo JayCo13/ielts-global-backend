@@ -42,6 +42,8 @@ from .admin.speaking_admin import router as speaking_admin_router
 from .admin.listening_alignment_admin import router as listening_alignment_admin_router
 from .student.audio_cues_routes import router as audio_cues_router
 from .admin.email_broadcast import router as email_broadcast_router
+from .customer.affiliate import router as affiliate_router
+from .admin.affiliate_admin import router as affiliate_admin_router
 
 router = APIRouter()
 
@@ -109,3 +111,6 @@ router.include_router(listening_alignment_admin_router, prefix="/admin", tags=["
 router.include_router(audio_cues_router, prefix="/student", tags=["student-audio-cues"])
 # Admin email broadcast with history/status (VN); /admin/marketing stays as-is.
 router.include_router(email_broadcast_router, prefix="/admin", tags=["admin-email-broadcast"])
+# Affiliate program (ported from VN): customer wallet/referrals + admin payouts.
+router.include_router(affiliate_router, prefix="/customer/affiliate", tags=["affiliate"])
+router.include_router(affiliate_admin_router, prefix="/admin", tags=["admin-affiliate"])
