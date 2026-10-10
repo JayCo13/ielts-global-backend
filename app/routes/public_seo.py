@@ -4,6 +4,7 @@ import json
 import html as html_lib
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, defer
 from app.database import get_db
 from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial
@@ -118,7 +119,8 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
         defer(WritingTask.instructions), defer(WritingTask.sample_essay)
     ).filter(
         WritingTask.test_id.in_(exam_ids),
-        WritingTask.is_forecast == True
+        # Same rule as the signed-in list: ticked manually OR auto (occurrence >= 1).
+        or_(WritingTask.is_forecast == True, WritingTask.occurrence_count >= 1)
     ).order_by(WritingTask.part_number).all()
     
     tasks_by_exam = {}
@@ -179,7 +181,7 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
             ExamSection.section_type == 'listening'
         ).order_by(ExamSection.order_number).all()
 
-        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False)]
+        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False) or (getattr(s, 'occurrence_count', 0) or 0) >= 1]
         if not forecast_sections:
             continue
 
@@ -217,7 +219,7 @@ async def get_public_reading_forecasts(db: Session = Depends(get_db)):
             ExamSection.section_type == 'reading'
         ).order_by(ExamSection.order_number).all()
 
-        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False)]
+        forecast_sections = [s for s in sections if getattr(s, 'is_forecast', False) or (getattr(s, 'occurrence_count', 0) or 0) >= 1]
         if not forecast_sections:
             continue
 
