@@ -193,7 +193,7 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
                 "completed": False,
                 "attempts_count": 0,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or [],
+                "question_types": getattr(s, 'question_types', None) or getattr(s, 'question_type_tags', None) or [],
                 "difficulty_label": s.difficulty_label,
                 "forecast_level": s.forecast_level
             })
@@ -231,7 +231,7 @@ async def get_public_reading_forecasts(db: Session = Depends(get_db)):
                 "completed": False,
                 "attempts_count": 0,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or [],
+                "question_types": getattr(s, 'question_types', None) or getattr(s, 'question_type_tags', None) or [],
                 "difficulty_label": s.difficulty_label,
                 "forecast_level": s.forecast_level
             })
@@ -696,7 +696,7 @@ async def seo_part_page(skill: str, section_id: int, request: Request, slug: str
     exam_title = _seo_clean(exam.title) or f"English {skill_label} Test"
     base = _seo_base(request)
     canonical = f"{base}/public/p/{skill}/{section_id}/{_seo_slugify(part_title)}"
-    qtypes = [q for q in (sec.question_types or []) if isinstance(q, str)]
+    qtypes = [q for q in (sec.question_types or sec.question_type_tags or []) if isinstance(q, str)]
     title_tag = f"{part_title} — English {skill_label} Practice | EnglishOnComputer"
     description = (
         f"Practice \"{part_title}\" — Part {sec.order_number} of {exam_title}, "

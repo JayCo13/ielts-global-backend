@@ -961,7 +961,7 @@ async def get_listening_forecasts(
                 "latest_score": latest_score,
                 "total_questions": expected,
                 "is_recommended": bool(getattr(s, 'is_recommended', False)),
-                "question_types": getattr(s, 'question_types', None) or [],
+                "question_types": getattr(s, 'question_types', None) or getattr(s, 'question_type_tags', None) or [],
                 "question_type_tags": s.question_type_tags or [],
                 "forecast_level": s.forecast_level,
                 "difficulty_label": s.difficulty_label,
