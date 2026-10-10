@@ -19,8 +19,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Create two separate ASYNC clients with different API keys for non-blocking calls
-client_evaluation = groq.AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-client_rewriting = groq.AsyncGroq(api_key=os.getenv("GROQ_REWRITING_API_KEY"))
+# The Groq client raises at construction when the key is empty, which used to take
+# the whole backend down at import time (every route, not just these AI ones). A
+# placeholder keeps the app booting; calls made without a real key fail at request
+# time with Groq's own authentication error.
+_GROQ_KEY_MISSING = "missing-groq-api-key"
+client_evaluation = groq.AsyncGroq(api_key=os.getenv("GROQ_API_KEY") or _GROQ_KEY_MISSING)
+client_rewriting = groq.AsyncGroq(
+    api_key=os.getenv("GROQ_REWRITING_API_KEY") or os.getenv("GROQ_API_KEY") or _GROQ_KEY_MISSING
+)
 
 class EssayEvaluationRequest(BaseModel):
     part_number: int
