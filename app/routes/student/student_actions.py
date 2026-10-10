@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Request
-from sqlalchemy.orm import Session, joinedload  # Add joinedload here
+from sqlalchemy.orm import Session, joinedload, defer  # Add joinedload here
 from typing import Optional
 from app.database import get_db
 from app.models.models import ExamAccessType, User, ExamResult, Exam, ExamSection, Question, QuestionOption, ReadingPassage, ListeningMedia, WritingTask, StudentAnswer, WritingAnswer, ListeningAnswer, SpeakingMaterial
@@ -733,7 +733,12 @@ async def get_writing_forecasts(
 
     # 3) Batch load all forecast writing tasks (ONE query)
     # Forecast writing tasks = manually ticked OR auto-forecast (occurrence >= 1)
-    all_forecast_tasks = db.query(WritingTask).filter(
+    # Heavy columns stay in the DB: instructions embed base64 images, and loading them
+    # for every task made this list response hundreds of MB (VN does the same; the
+    # card preview image comes from POST /writing/thumbnails).
+    all_forecast_tasks = db.query(WritingTask).options(
+        defer(WritingTask.instructions), defer(WritingTask.sample_essay)
+    ).filter(
         WritingTask.test_id.in_(exam_ids),
         or_(WritingTask.is_forecast == True, WritingTask.occurrence_count >= 1)
     ).order_by(WritingTask.part_number).all()
@@ -795,7 +800,6 @@ async def get_writing_forecasts(
                 "task_type": t.task_type,
                 "task1_type": t.task1_type,
                 "task2_type": t.task2_type,
-                "instructions": t.instructions,
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False)),
                 "question_type_tags": getattr(t, 'question_type_tags', []) or [],
@@ -814,6 +818,39 @@ async def get_writing_forecasts(
     result.sort(key=lambda r: type_order.get(r["task1_type"], len(type_order)))
 
     return result
+
+@router.post("/writing/thumbnails", response_model=dict)
+async def get_writing_thumbnails(
+    request: Request,
+    current_student = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Batch fetch the first image of a few writing tasks (VN port) — called lazily
+    by the Focus list after it renders, at most 6 tasks per call."""
+    body = await request.json()
+    task_ids = body.get("task_ids", [])
+    if not isinstance(task_ids, list) or not task_ids or len(task_ids) > 6:
+        return {"thumbnails": {}}
+    try:
+        task_ids = [int(t) for t in task_ids]
+    except (TypeError, ValueError):
+        return {"thumbnails": {}}
+
+    rows = db.query(
+        WritingTask.task_id,
+        WritingTask.instructions
+    ).filter(WritingTask.task_id.in_(task_ids)).all()
+
+    thumbnails = {}
+    for tid, instructions in rows:
+        if instructions:
+            # First <img> src — a URL or an inline data:image/... value
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', instructions)
+            if img_match:
+                thumbnails[str(tid)] = img_match.group(1)
+
+    return {"thumbnails": thumbnails}
+
 
 @router.get("/listening/forecasts", response_model=List[dict])
 async def get_listening_forecasts(
@@ -2044,7 +2081,11 @@ async def get_writing_tasks(
         access_by_exam.setdefault(a.exam_id, []).append(a.access_type)
 
     # 3) Batch load all writing tasks (ONE query)
-    all_tasks = db.query(WritingTask).filter(
+    # instructions / sample_essay are deferred and left out of this list (see
+    # /writing/forecasts); the test room loads them per task via /writing/tasks/{id}.
+    all_tasks = db.query(WritingTask).options(
+        defer(WritingTask.instructions), defer(WritingTask.sample_essay)
+    ).filter(
         WritingTask.test_id.in_(exam_ids)
     ).order_by(WritingTask.part_number).all()
     tasks_by_exam = {}
@@ -2149,8 +2190,6 @@ async def get_writing_tasks(
                 "task_type": task.task_type,
                 "task1_type": task.task1_type,
                 "task2_type": task.task2_type,
-                "instructions": task.instructions,
-                "sample_essay": getattr(task, 'sample_essay', None),
                 "word_limit": task.word_limit,
                 "total_marks": task.total_marks,
                 "duration": task.duration,

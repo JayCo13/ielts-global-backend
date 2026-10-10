@@ -1,6 +1,6 @@
 """Admin: manage auto-forecast Occurrence Count per part + decay settings."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from sqlalchemy import or_
 from pydantic import BaseModel
 from typing import Optional
@@ -31,6 +31,7 @@ async def list_parts(
     rows = []
     secs = (
         db.query(ExamSection)
+        .options(defer(ExamSection.description))
         .filter(ExamSection.section_type.in_(['reading', 'listening']))
         .all()
     )
@@ -48,7 +49,10 @@ async def list_parts(
             "forecast_level": s.forecast_level,
             "last_updated": _iso(s.forecast_last_updated),
         })
-    tasks = db.query(WritingTask).all()
+    # Only light columns are listed; instructions/sample_essay embed base64 images.
+    tasks = db.query(WritingTask).options(
+        defer(WritingTask.instructions), defer(WritingTask.sample_essay)
+    ).all()
     for t in tasks:
         rows.append({
             "kind": "task",

@@ -4,7 +4,7 @@ import json
 import html as html_lib
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, Response
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from app.database import get_db
 from app.models.models import Exam, ExamSection, WritingTask, SpeakingMaterial
 from app.enums.enums import TASK1_QUESTION_TYPE_ORDER, TASK2_QUESTION_TYPE_ORDER
@@ -113,7 +113,10 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
     if not exam_ids:
         return []
 
-    all_forecast_tasks = db.query(WritingTask).filter(
+    # instructions / sample_essay embed base64 images and are not returned here.
+    all_forecast_tasks = db.query(WritingTask).options(
+        defer(WritingTask.instructions), defer(WritingTask.sample_essay)
+    ).filter(
         WritingTask.test_id.in_(exam_ids),
         WritingTask.is_forecast == True
     ).order_by(WritingTask.part_number).all()

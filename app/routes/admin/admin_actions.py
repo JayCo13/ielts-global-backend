@@ -1,6 +1,6 @@
 import json
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 from app.database import get_db
 from app.models.models import Exam, ExamSection, Question, QuestionOption, ReadingPassage, WritingAnswer, QuestionGroup, ListeningMedia, WritingTask, User, ExamResult, PackageTransaction, StudentAnswer, VIPPackage, VIPSubscription, ExamAccessType, AdminNotificationRead, SpeakingMaterial, SpeakingMaterialAccessType, ListeningCueOverride, ListeningAlignment
 from app.routes.admin.auth import get_current_admin
@@ -2159,7 +2159,9 @@ async def get_writing_tests(
 
     result = []
     for test in writing_tests:
+        # This list returns no instructions/sample_essay (they embed base64 images).
         tasks = db.query(WritingTask)\
+            .options(defer(WritingTask.instructions), defer(WritingTask.sample_essay))\
             .filter(WritingTask.test_id == test.exam_id)\
             .order_by(WritingTask.part_number)\
             .all()
