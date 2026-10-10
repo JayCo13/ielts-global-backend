@@ -16,9 +16,12 @@ Storage
     connected or a Redis call fails. It is per process, so with more than one worker
     each worker only sees the takers whose heartbeats it received.
 
-Only real takers are counted. The VN version adds a synthetic "social proof" number
-on top of the real count; that part is deliberately not ported.
+Displayed count = real takers + a synthetic "social proof" number, as in VN (ported
+on the owner's request, 2026-10). Set LIVE_PRESENCE_SYNTHETIC=0 to show real takers
+only.
 """
+import hashlib
+import os
 import re
 import time
 from typing import Dict, List, Optional
@@ -42,6 +45,132 @@ _SCOPE_RE = re.compile(r"^[0-9]{1,10}(p[0-9]{1,2})?$")
 
 # In-memory fallback: scope -> {user_id: last_beat_epoch}
 _memory: Dict[str, Dict[str, float]] = {}
+
+# ── Synthetic activity (VN) ─────────────────────────────────────────────────
+# A per-scope number that does a smooth random walk: every FAKE_TICK seconds it
+# moves -1 (25%) / holds (50%) / +1 (25%) and is clamped to its tier's range. The
+# step is a hash of (scope, tick), so every worker evolves a scope identically.
+# State ("value:tick") lives in Redis, or in this process when Redis is down.
+FAKE_ENABLED = os.getenv("LIVE_PRESENCE_SYNTHETIC", "1").strip().lower() not in ("0", "false", "off", "no")
+FAKE_TICK = 30            # seconds per random-walk step
+FAKE_MAX_CATCHUP = 240    # cap on steps applied when a scope was not read for a while
+# The first FEATURED_COUNT exams of each skill get the higher band, the rest the lower.
+TIER_A_RANGE = (10, 100)
+TIER_B_RANGE = (5, 50)
+FEATURED_COUNT = 6
+FEATURED_TTL = 600        # re-query the "first 6 per skill" set at most every 10 min
+
+_featured = {"ids": set(), "ts": 0.0}
+_fake_memory: Dict[str, str] = {}   # scope -> "value:tick" (fallback state)
+
+
+def _featured_ids() -> set:
+    """exam ids among the first FEATURED_COUNT of their skill, by ascending id.
+    Cached; keeps the last known set if the query fails."""
+    now = time.time()
+    if _featured["ts"] and (now - _featured["ts"] < FEATURED_TTL):
+        return _featured["ids"]
+    try:
+        from app.database import SessionLocal
+        from app.models.models import ExamSection, WritingTask
+        ids = set()
+        db = SessionLocal()
+        try:
+            for stype in ("reading", "listening"):
+                rows = (db.query(ExamSection.exam_id)
+                        .filter(ExamSection.section_type == stype)
+                        .distinct().order_by(ExamSection.exam_id.asc())
+                        .limit(FEATURED_COUNT).all())
+                ids.update(r[0] for r in rows if r[0] is not None)
+            wrows = (db.query(WritingTask.test_id).distinct()
+                     .order_by(WritingTask.test_id.asc())
+                     .limit(FEATURED_COUNT).all())
+            ids.update(r[0] for r in wrows if r[0] is not None)
+        finally:
+            db.close()
+        _featured["ids"] = ids
+    except Exception:
+        pass
+    _featured["ts"] = now   # also after a failure, so a DB outage is not retried per call
+    return _featured["ids"]
+
+
+def _tier_bounds(scope: str, featured: set):
+    try:
+        eid = int(scope.split("p", 1)[0])
+    except ValueError:
+        return TIER_B_RANGE
+    return TIER_A_RANGE if eid in featured else TIER_B_RANGE
+
+
+def _hash_int(s: str) -> int:
+    return int(hashlib.sha256(s.encode()).hexdigest(), 16)
+
+
+def _walk_step(scope: str, tick: int) -> int:
+    """Deterministic per (scope, tick) step: -1 (25%) / 0 (50%) / +1 (25%)."""
+    r = (_hash_int(f"walk:{scope}:{tick}") % 1000) / 1000.0
+    if r < 0.25:
+        return -1
+    if r < 0.75:
+        return 0
+    return 1
+
+
+def _advance(scope: str, raw: Optional[str], cur_tick: int, lo: int, hi: int):
+    """(value, new_state_or_None) from the stored "value:tick" state."""
+    try:
+        val_s, tick_s = (raw or "").split(":", 1)
+        value = max(lo, min(hi, int(val_s)))
+        stored_tick = int(tick_s)
+    except ValueError:
+        # First read of this scope: deterministic seed inside the tier range.
+        value = lo + (_hash_int(f"seed:{scope}") % (hi - lo + 1))
+        return value, f"{value}:{cur_tick}"
+    if cur_tick <= stored_tick:
+        return value, None
+    steps = min(cur_tick - stored_tick, FAKE_MAX_CATCHUP)
+    for t in range(cur_tick - steps + 1, cur_tick + 1):
+        value = max(lo, min(hi, value + _walk_step(scope, t)))
+    return value, f"{value}:{cur_tick}"
+
+
+async def _fake_counts(scopes: List[str]) -> Dict[str, int]:
+    if not FAKE_ENABLED or not scopes:
+        return {}
+    featured = _featured_ids()
+    cur_tick = int(time.time() // FAKE_TICK)
+    bounds = {s: _tier_bounds(s, featured) for s in scopes}
+    ttl = FAKE_TICK * (FAKE_MAX_CATCHUP + 20)
+    client = cache.redis_client
+    if client:
+        try:
+            raws = await client.mget([f"fake_walk:{s}" for s in scopes])
+            out = {}
+            pipe = client.pipeline()
+            for s, raw in zip(scopes, raws):
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                value, state = _advance(s, raw, cur_tick, *bounds[s])
+                out[s] = value
+                if state:
+                    pipe.set(f"fake_walk:{s}", state, ex=ttl)
+                else:
+                    # keep an actively viewed scope's walk state alive
+                    pipe.expire(f"fake_walk:{s}", ttl)
+            await pipe.execute()
+            return out
+        except Exception:
+            pass
+    out = {}
+    if len(_fake_memory) > MAX_MEMORY_SCOPES:
+        _fake_memory.clear()
+    for s in scopes:
+        value, state = _advance(s, _fake_memory.get(s), cur_tick, *bounds[s])
+        out[s] = value
+        if state:
+            _fake_memory[s] = state
+    return out
 
 
 def _valid(scope: str) -> bool:
@@ -119,9 +248,16 @@ async def _leave(scope: str, user_id: str) -> None:
 
 
 async def _counts(scopes: List[str]) -> Dict[str, int]:
-    """Live count per scope. One Redis round trip for the whole batch."""
+    """Displayed count per scope = real live takers + synthetic activity."""
     if not scopes:
         return {}
+    real = await _real_counts(scopes)
+    fake = await _fake_counts(scopes)
+    return {scope: real.get(scope, 0) + fake.get(scope, 0) for scope in scopes}
+
+
+async def _real_counts(scopes: List[str]) -> Dict[str, int]:
+    """Real takers per scope. One Redis round trip for the whole batch."""
     now = time.time()
     client = cache.redis_client
     if client:
