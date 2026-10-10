@@ -2137,6 +2137,11 @@ async def get_writing_tasks(
         else:
             allowed_types = ['no vip']
 
+    # VN port: accounts without Writing VIP still see every test, but the client hides
+    # the Important Level stars behind an upgrade prompt (vip_locked).
+    from app.routes.AI.writing_ai import is_vip as _has_writing_vip
+    writing_vip = current_student.role == 'student' or _has_writing_vip(current_student, db)
+
     # Build response using pre-loaded data
     exam_details = []
     for exam in exams:
@@ -2180,6 +2185,7 @@ async def get_writing_tasks(
             "created_at": exam.created_at,
             "is_completed": answered_count == len(tasks),
             "overall_band": overall_band,
+            "vip_locked": not writing_vip,
             "task1_type": part1_task1_type,
             "task2_type": part2_task2_type,
             "difficulty_avg": difficulty_avg,
