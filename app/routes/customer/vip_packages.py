@@ -8,7 +8,7 @@ from typing import List
 from pydantic import BaseModel
 import os
 from app.utils.datetime_utils import get_vietnam_time
-from app.utils.currency import vnd_to_usd
+from app.utils.currency import vnd_to_usd, USD_VND_RATE
 import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -40,6 +40,12 @@ async def get_available_packages(
         "package_type": pkg.package_type,
         "skill_type": pkg.skill_type
     } for pkg in packages]
+
+@router.get("/currency", response_model=dict)
+async def get_display_currency():
+    """Fixed rate used to show VND amounts in USD (public; read by the admin UI)."""
+    return {"currency": "USD", "usd_vnd_rate": USD_VND_RATE}
+
 
 @router.get("/subscription/status", response_model=dict)
 async def get_subscription_status(
