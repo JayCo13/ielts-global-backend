@@ -2561,7 +2561,8 @@ async def get_forecast_meta(
         ExamSection.is_forecast,
         ExamSection.forecast_title,
         ExamSection.is_recommended,
-        ExamSection.question_types
+        ExamSection.question_types,
+        ExamSection.question_type_tags
     ).all()
 
     # Also get writing task forecast info in ONE query
@@ -2573,7 +2574,8 @@ async def get_forecast_meta(
         WritingTask.is_recommended,
         WritingTask.title,
         WritingTask.task1_type,
-        WritingTask.task2_type
+        WritingTask.task2_type,
+        WritingTask.question_type_tags
     ).all()
 
     # Build maps
@@ -2587,7 +2589,8 @@ async def get_forecast_meta(
             "is_forecast": bool(s.is_forecast),
             "forecast_title": s.forecast_title,
             "is_recommended": bool(s.is_recommended) if s.is_recommended else False,
-            "question_types": s.question_types or []
+            "question_types": s.question_types or [],
+            "question_type_tags": s.question_type_tags or []   # VN admin tags (what the student filters use)
         })
 
     writing_meta = {}  # test_id -> [parts]
@@ -2601,7 +2604,8 @@ async def get_forecast_meta(
             "is_recommended": bool(t.is_recommended) if t.is_recommended else False,
             "title": t.title or "",
             "task1_type": t.task1_type,
-            "task2_type": t.task2_type
+            "task2_type": t.task2_type,
+            "question_type_tags": t.question_type_tags or []
         })
 
     return {
