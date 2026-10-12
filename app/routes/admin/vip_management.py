@@ -6,7 +6,7 @@ from app.routes.admin.auth import get_current_admin
 from datetime import datetime
 from typing import List
 from sqlalchemy.orm import joinedload
-from sqlalchemy import func, case
+from sqlalchemy import func, case, select
 from pydantic import BaseModel
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.currency import vnd_to_usd
@@ -473,4 +473,165 @@ async def get_total_revenue(
             "year": int(year),
             "revenue": float(revenue)
         } for year, revenue in yearly_revenue]
+    }
+
+
+def _revenue_events():
+    """Every payment actually taken in, as (amount, created_at) rows. The global site
+    has one revenue source: completed VIP package transactions."""
+    return select(
+        PackageTransaction.amount.label("amount"),
+        PackageTransaction.created_at.label("created_at"),
+    ).where(PackageTransaction.status == "completed").subquery()
+
+
+@router.get("/dashboard/revenue-detail", response_model=dict)
+async def get_revenue_detail(
+    current_admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """Detailed revenue analytics: daily, monthly, quarterly, yearly with comparisons
+    (ported from the Vietnam tree). Amounts are VND, as collected."""
+    rev = _revenue_events()
+    from datetime import timedelta
+    from calendar import monthrange
+    now = get_vietnam_time().replace(tzinfo=None)
+
+    # ── DAILY ──
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+
+    today_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= today_start
+    ).scalar())
+
+    yesterday_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= yesterday_start,
+        rev.c.created_at < today_start
+    ).scalar())
+
+    daily_change = round(((today_rev - yesterday_rev) / yesterday_rev) * 100, 1) if yesterday_rev > 0 else None
+
+    # ── MONTHLY ──
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if now.month == 1:
+        prev_month_start = now.replace(year=now.year - 1, month=12, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        prev_month_start = now.replace(month=now.month - 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    current_month_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= month_start
+    ).scalar())
+
+    prev_month_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= prev_month_start,
+        rev.c.created_at < month_start
+    ).scalar())
+
+    monthly_change = round(((current_month_rev - prev_month_rev) / prev_month_rev) * 100, 1) if prev_month_rev > 0 else None
+
+    # ── QUARTERLY ──
+    def get_quarter(month):
+        return (month - 1) // 3 + 1
+
+    def quarter_start_month(q):
+        return (q - 1) * 3 + 1
+
+    current_q = get_quarter(now.month)
+    current_q_start = now.replace(month=quarter_start_month(current_q), day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Previous quarter
+    if current_q == 1:
+        prev_q = 4
+        prev_q_year = now.year - 1
+    else:
+        prev_q = current_q - 1
+        prev_q_year = now.year
+
+    prev_q_start = datetime(prev_q_year, quarter_start_month(prev_q), 1, 0, 0, 0)
+    prev_q_end = current_q_start
+
+    current_q_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= current_q_start
+    ).scalar())
+
+    prev_q_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= prev_q_start,
+        rev.c.created_at < prev_q_end
+    ).scalar())
+
+    quarterly_change = round(((current_q_rev - prev_q_rev) / prev_q_rev) * 100, 1) if prev_q_rev > 0 else None
+
+    # Full quarterly breakdown across ALL years
+    quarter_breakdown_raw = db.query(
+        func.extract('year', rev.c.created_at).label('year'),
+        func.extract('month', rev.c.created_at).label('month'),
+        func.sum(rev.c.amount).label('revenue')
+    ).group_by(
+        func.extract('year', rev.c.created_at),
+        func.extract('month', rev.c.created_at)
+    ).all()
+
+    # Group monthly data into quarters
+    from collections import defaultdict
+    quarter_buckets = defaultdict(float)
+    for year_val, month_val, revenue in quarter_breakdown_raw:
+        y = int(year_val)
+        q = get_quarter(int(month_val))
+        quarter_buckets[(y, q)] += float(revenue)
+
+    quarter_breakdown = sorted([
+        {
+            "year": y,
+            "quarter": f"Q{q}",
+            "quarter_number": q,
+            "months": f"{quarter_start_month(q)}-{quarter_start_month(q) + 2}",
+            "revenue": rev
+        }
+        for (y, q), rev in quarter_buckets.items()
+    ], key=lambda x: (x["year"], x["quarter_number"]))
+
+    # ── YEARLY ──
+    year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_year_start = datetime(now.year - 1, 1, 1, 0, 0, 0)
+
+    current_year_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= year_start
+    ).scalar())
+
+    prev_year_rev = float(db.query(func.coalesce(func.sum(rev.c.amount), 0)).filter(
+        rev.c.created_at >= prev_year_start,
+        rev.c.created_at < year_start
+    ).scalar())
+
+    yearly_change = round(((current_year_rev - prev_year_rev) / prev_year_rev) * 100, 1) if prev_year_rev > 0 else None
+
+    return {
+        "daily": {
+            "today": today_rev,
+            "yesterday": yesterday_rev,
+            "change_percent": daily_change
+        },
+        "monthly": {
+            "current_month": current_month_rev,
+            "current_month_label": f"{now.month}/{now.year}",
+            "previous_month": prev_month_rev,
+            "previous_month_label": f"{prev_month_start.month}/{prev_month_start.year}",
+            "change_percent": monthly_change
+        },
+        "quarterly": {
+            "current_quarter": current_q_rev,
+            "current_quarter_label": f"Q{current_q}/{now.year}",
+            "previous_quarter": prev_q_rev,
+            "previous_quarter_label": f"Q{prev_q}/{prev_q_year}",
+            "change_percent": quarterly_change,
+            "quarter_breakdown": quarter_breakdown
+        },
+        "yearly": {
+            "current_year": current_year_rev,
+            "current_year_label": str(now.year),
+            "previous_year": prev_year_rev,
+            "previous_year_label": str(now.year - 1),
+            "change_percent": yearly_change
+        }
     }
