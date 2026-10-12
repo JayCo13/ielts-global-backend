@@ -8,6 +8,7 @@ from typing import List
 from pydantic import BaseModel
 import os
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.currency import vnd_to_usd
 import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -17,6 +18,7 @@ class PackageResponse(BaseModel):
     name: str
     duration_months: int
     price: float
+    price_usd: float | None = None   # display price; the charge itself is `price` (VND)
     description: str | None
     package_type: str
     skill_type: str | None
@@ -33,6 +35,7 @@ async def get_available_packages(
         "name": pkg.name,
         "duration_months": pkg.duration_months,
         "price": pkg.price,
+        "price_usd": vnd_to_usd(pkg.price),
         "description": pkg.description,
         "package_type": pkg.package_type,
         "skill_type": pkg.skill_type

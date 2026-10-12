@@ -9,6 +9,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy import func, case
 from pydantic import BaseModel
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.currency import vnd_to_usd
 
 router = APIRouter()
 class TransactionUpdate(BaseModel):
@@ -71,6 +72,7 @@ async def get_all_packages(
             "duration_months": p.duration_months,
             "package_type": p.package_type,
             "price": p.price,
+            "price_usd": vnd_to_usd(p.price),   # what customers see
             "description": p.description,
             "is_active": p.is_active,
             "ls_variant_id": p.ls_variant_id,

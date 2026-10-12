@@ -12,28 +12,33 @@ Global differences from VN:
     and auth code paths are left untouched.
   * The wallet has ONE currency (AFFILIATE_CURRENCY, default VND). Amounts are stored
     as integers in that currency's minor unit (VND: 1 = 1 VND; USD: 1 = 1 cent).
-    A transaction paid in another currency is skipped, never converted.
+  * A USD wallet converts VND payments (PayOS / bank transfer) at the site's fixed
+    display rate (USD_VND_RATE), so commission matches the USD price the buyer saw.
+    A VND wallet still skips USD payments.
 """
 import os
 import random
 import string
 
 from app.models.models import User, AffiliateWalletTx, PackageTransaction
+from app.utils.currency import vnd_to_usd
 
 COMMISSION_RATE = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.10"))
 AFFILIATE_CURRENCY = (os.getenv("AFFILIATE_CURRENCY", "VND") or "VND").upper()
 # Minor units per 1 unit of currency: VND has none, USD has cents.
 UNIT_DIVISOR = 100 if AFFILIATE_CURRENCY == "USD" else 1
-_DEFAULT_MIN = "2000" if AFFILIATE_CURRENCY == "USD" else "300000"   # 20.00 USD / 300,000 VND
+_DEFAULT_MIN = "1000" if AFFILIATE_CURRENCY == "USD" else "300000"   # 10.00 USD / 300,000 VND
 WITHDRAW_MIN_XU = int(os.getenv("AFFILIATE_WITHDRAW_MIN", _DEFAULT_MIN))
 _ALPHABET = string.ascii_uppercase + string.digits
 
 
 def format_amount(units: int) -> str:
-    """Human-readable wallet amount, e.g. '300,000 VND' or '20.00 USD'."""
+    """Human-readable wallet amount, e.g. '300,000 VND' or '$10.00'."""
     units = int(units or 0)
     if UNIT_DIVISOR == 1:
         return f"{units:,} {AFFILIATE_CURRENCY}"
+    if AFFILIATE_CURRENCY == "USD":
+        return f"${units / UNIT_DIVISOR:,.2f}"
     return f"{units / UNIT_DIVISOR:,.2f} {AFFILIATE_CURRENCY}"
 
 
@@ -61,6 +66,17 @@ def transaction_currency(transaction) -> str:
     return "VND"
 
 
+def amount_in_wallet_currency(transaction):
+    """transaction.amount expressed in the wallet currency (major units), or None
+    when it cannot be credited to this wallet."""
+    paid_in = transaction_currency(transaction)
+    if paid_in == AFFILIATE_CURRENCY:
+        return float(transaction.amount)
+    if paid_in == "VND" and AFFILIATE_CURRENCY == "USD":
+        return vnd_to_usd(transaction.amount)
+    return None
+
+
 def credit_referral_commission(db, transaction) -> bool:
     """Idempotently credit the buyer's referrer 10% of transaction.amount.
     Does NOT commit — the caller's own db.commit() persists it. Returns True only
@@ -68,7 +84,8 @@ def credit_referral_commission(db, transaction) -> bool:
     try:
         if not transaction or transaction.amount is None:
             return False
-        if transaction_currency(transaction) != AFFILIATE_CURRENCY:
+        paid = amount_in_wallet_currency(transaction)
+        if paid is None:
             return False
         buyer = db.query(User).filter(User.user_id == transaction.user_id).first()
         if not buyer or not buyer.referred_by or buyer.referred_by == buyer.user_id:
@@ -81,7 +98,7 @@ def credit_referral_commission(db, transaction) -> bool:
         referrer = db.query(User).filter(User.user_id == buyer.referred_by).first()
         if not referrer:
             return False
-        commission = int(round(float(transaction.amount) * UNIT_DIVISOR * COMMISSION_RATE))
+        commission = int(round(paid * UNIT_DIVISOR * COMMISSION_RATE))
         if commission <= 0:
             return False
         referrer.affiliate_balance = (referrer.affiliate_balance or 0) + commission
@@ -123,9 +140,9 @@ def sync_commissions(db, referrer_id: int = None, limit: int = 500) -> int:
         )
         # Same currency rule as transaction_currency(), applied in SQL so skipped
         # transactions don't pile up at the head of the scan.
-        if AFFILIATE_CURRENCY == "USD":
-            q = q.filter(PackageTransaction.ls_order_id.isnot(None))
-        else:
+        # A USD wallet takes every payment (VND ones are converted); a VND wallet
+        # only takes VND ones.
+        if AFFILIATE_CURRENCY != "USD":
             q = q.filter(PackageTransaction.ls_order_id.is_(None))
         if referrer_id is not None:
             q = q.filter(User.referred_by == referrer_id)

@@ -222,10 +222,12 @@ async def my_withdrawals(db: Session = Depends(get_db), current: User = Depends(
 
 
 def _has_payout(user: User) -> bool:
-    """User can withdraw once they've provided a QR image OR full bank details."""
-    has_bank = bool((user.payout_bank or "").strip() and (user.payout_account_number or "").strip()
-                    and (user.payout_account_holder or "").strip())
-    return bool(user.payout_qr_url) or has_bank
+    """Commission is paid out through PayPal only: the user can withdraw once they
+    have saved a PayPal email and the name on that account. (QR / bank details saved
+    earlier are kept but no longer count.)"""
+    email = (user.payout_account_number or "").strip()
+    return bool((user.payout_bank or "").strip().lower() == "paypal"
+                and "@" in email and (user.payout_account_holder or "").strip())
 
 
 @router.get("/payment")
@@ -299,7 +301,7 @@ async def request_withdraw(
     current: User = Depends(get_current_student),
 ):
     if not _has_payout(current):
-        raise HTTPException(status_code=400, detail="Please add your payout details (QR code or bank / PayPal account) before withdrawing")
+        raise HTTPException(status_code=400, detail="Please add your PayPal account before withdrawing")
     # Lock the user row so two concurrent /withdraw calls can't both pass the
     # balance check and double-spend (TOCTOU). Re-read balance under the lock.
     locked = db.query(User).filter(User.user_id == current.user_id).with_for_update().first()
@@ -313,7 +315,7 @@ async def request_withdraw(
         raise HTTPException(status_code=400, detail="The amount exceeds your balance")
 
     # Deduct immediately; refunded if the admin later rejects. Snapshot the saved
-    # payout method (QR + bank) so the admin can just scan and transfer.
+    # payout method (PayPal account) so the admin can just send the payment.
     locked.affiliate_balance = balance - amount
     db.add(AffiliateWalletTx(
         user_id=current.user_id,
