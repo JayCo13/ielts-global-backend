@@ -5,6 +5,7 @@ wallet balance + history, and can request a withdrawal once the balance reaches 
 minimum. Commission is credited by reconciliation (see app/utils/affiliate.py).
 """
 import os
+import re
 import uuid
 from typing import Optional, List
 
@@ -253,9 +254,17 @@ async def set_payment(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_student),
 ):
-    current.payout_bank = (payload.bank or "").strip() or None
-    current.payout_account_number = (payload.account_number or "").strip() or None
-    current.payout_account_holder = (payload.account_holder or "").strip() or None
+    # PayPal is the only payout method: `account_number` is the PayPal email and
+    # `bank` is always stored as "PayPal", whatever the client sends.
+    email = (payload.account_number or "").strip()
+    holder = (payload.account_holder or "").strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(status_code=400, detail="Please enter the email address of your PayPal account.")
+    if not holder:
+        raise HTTPException(status_code=400, detail="Please enter the name on your PayPal account.")
+    current.payout_bank = "PayPal"
+    current.payout_account_number = email
+    current.payout_account_holder = holder
     db.commit()
     return {"ok": True, "is_set": _has_payout(current)}
 
@@ -266,6 +275,8 @@ async def upload_payout_qr(
     db: Session = Depends(get_db),
     current: User = Depends(get_current_student),
 ):
+    # Payouts are PayPal-only now; bank-transfer QR codes are no longer accepted.
+    raise HTTPException(status_code=400, detail="Payouts are made through PayPal only. Please add your PayPal account instead.")
     data = await image.read()
     ext = validate_image_bytes(data)   # magic-byte + size check; safe extension
     # Koyeb's disk is ephemeral: keep the QR in R2 (absolute URL), like other uploads.
@@ -330,7 +341,7 @@ async def request_withdraw(
         account_holder=current.payout_account_holder,
         account_number=current.payout_account_number,
         bank=current.payout_bank,
-        qr_url=current.payout_qr_url,
+        qr_url=None,   # PayPal only — a QR saved before the change is not used
         status="pending",
     )
     db.add(w)
@@ -341,6 +352,6 @@ async def request_withdraw(
     background_tasks.add_task(
         _notify_admin_withdrawal, current.username, current.email, int(amount),
         current.payout_bank, current.payout_account_number, current.payout_account_holder,
-        bool(current.payout_qr_url),
+        False,
     )
     return {"ok": True, "withdrawal_id": w.withdrawal_id, "status": w.status, "balance": locked.affiliate_balance}
