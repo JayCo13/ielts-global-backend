@@ -9,6 +9,7 @@ from pydantic import BaseModel
 import os
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.currency import vnd_to_usd, USD_VND_RATE
+from app.utils.vip_access import ALL_SKILLS_COVERS, package_covers
 import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -74,12 +75,13 @@ async def get_subscription_status(
             package = sub.package
             days_remaining = (sub.end_date - get_vietnam_time().replace(tzinfo=None)).days
             
-            # Update skill access based on package type
+            # Update skill access based on package type. 'all_skills' is the
+            # Listening + Reading bundle: it does not include Writing or Speaking
+            # (see app/utils/vip_access.py).
             if package.package_type == "all_skills":
                 skill_access["all_skills"] = True
-                skill_access["reading"] = True
-                skill_access["writing"] = True
-                skill_access["listening"] = True
+                for _skill in ALL_SKILLS_COVERS:
+                    skill_access[_skill] = True
             elif package.package_type == "single_skill" and package.skill_type:
                 skill_access[package.skill_type] = True
             
@@ -270,14 +272,16 @@ async def purchase_package(
     if existing_pending:
         db.commit()
 
-    # Subscription stacking: new access starts when the current active one ends
+    # Subscription stacking: new access starts when the latest subscription that
+    # ALREADY covers the same skill ends. package_covers() keeps that honest: an
+    # all_skills (Listening + Reading) subscription must not delay a Writing or
+    # Speaking purchase.
     if package.package_type == "single_skill":
         active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
             VIPSubscription.user_id == current_user.user_id,
             VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
             VIPSubscription.payment_status == "completed",
-            ((VIPPackage.package_type == "single_skill") & (VIPPackage.skill_type == package.skill_type)) |
-            (VIPPackage.package_type == "all_skills")
+            package_covers(package.skill_type)
         ).order_by(VIPSubscription.end_date.desc()).first()
     else:
         active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(

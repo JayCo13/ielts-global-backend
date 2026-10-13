@@ -12,6 +12,12 @@ from app.utils.datetime_utils import get_vietnam_time
 from app.utils.currency import vnd_to_usd
 
 router = APIRouter()
+
+# Skills sold as single-skill packages. Speaking is only ever sold this way: the
+# 'all_skills' bundle covers Listening + Reading (app/utils/vip_access.py).
+VALID_SKILL_TYPES = ('reading', 'writing', 'listening', 'speaking')
+
+
 class TransactionUpdate(BaseModel):
     status: str
     admin_note: str | None = None
@@ -37,10 +43,10 @@ async def create_vip_package(
     
     # Validate skill type for single skill packages
     if package_type == 'single_skill':
-        if skill_type not in ['reading', 'writing', 'listening']:
+        if skill_type not in VALID_SKILL_TYPES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Skill type must be 'reading', 'writing', or 'listening'"
+                detail="Skill type must be 'reading', 'writing', 'listening' or 'speaking'"
             )
     
     package = VIPPackage(
@@ -109,10 +115,10 @@ async def update_package(
         
         # Validate skill type for single skill packages
         if package_type == 'single_skill':
-            if skill_type not in ['reading', 'writing', 'listening']:
+            if skill_type not in VALID_SKILL_TYPES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Skill type must be 'reading', 'writing', or 'listening'"
+                    detail="Skill type must be 'reading', 'writing', 'listening' or 'speaking'"
                 )
             package.skill_type = skill_type
         else:
