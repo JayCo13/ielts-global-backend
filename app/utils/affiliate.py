@@ -23,7 +23,7 @@ import string
 from app.models.models import User, AffiliateWalletTx, PackageTransaction
 from app.utils.currency import vnd_to_usd
 
-COMMISSION_RATE = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.10"))
+COMMISSION_RATE = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.20"))
 AFFILIATE_CURRENCY = (os.getenv("AFFILIATE_CURRENCY", "VND") or "VND").upper()
 # Minor units per 1 unit of currency: VND has none, USD has cents.
 UNIT_DIVISOR = 100 if AFFILIATE_CURRENCY == "USD" else 1
