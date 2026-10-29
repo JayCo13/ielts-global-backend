@@ -539,38 +539,47 @@ async def _handle_subscription_expired(
 async def _handle_order_refunded(event: dict, event_data: dict, attrs: dict, db: Session):
     """
     Handle order_refunded event.
-    Strict policy: immediately deactivate VIP and cancel subscription.
+    Strict policy: immediately end the VIP bought with this order and cancel its LS
+    subscription (if any). Other purchases of the same user are left untouched.
+
+    Status values must exist in the DB ENUMs: transactions use 'reject'
+    (transaction_status_types) and subscriptions 'expired' (payment_status_types) —
+    there is no 'refunded' value, and writing one fails on TiDB strict mode.
     """
     custom_data = _extract_custom_data(event)
-    user_id = custom_data.get("user_id")
     ls_order_id = str(event_data.get("id", ""))
+    now = get_vietnam_time().replace(tzinfo=None)
 
-    if not user_id:
-        logger.warning(f"LS order_refunded: no user_id in custom_data, order={ls_order_id}")
-        return
-
-    user_id = int(user_id)
-
-    # Update transaction record to refunded
-    transaction = db.query(PackageTransaction).filter(
+    transactions = db.query(PackageTransaction).filter(
         PackageTransaction.ls_order_id == ls_order_id
-    ).first()
-
-    if transaction:
-        transaction.status = "refunded"
-        logger.info(f"LS order_refunded: transaction {transaction.transaction_id} marked as refunded")
-
-    # Find and deactivate ALL active subscriptions for this user linked to this order
-    subscriptions = db.query(VIPSubscription).filter(
-        VIPSubscription.user_id == user_id,
-        VIPSubscription.payment_status == "completed",
     ).all()
 
+    if not transactions:
+        logger.warning(f"LS order_refunded: no transaction found for order={ls_order_id}, nothing revoked")
+        return
+
+    user_id = transactions[0].user_id or (int(custom_data["user_id"]) if custom_data.get("user_id") else None)
+
+    subscription_ids = set()
+    for transaction in transactions:
+        transaction.status = "reject"
+        transaction.admin_note = f"Refunded on Lemon Squeezy ({now.strftime('%Y-%m-%d %H:%M')})"
+        if transaction.subscription_id:
+            subscription_ids.add(transaction.subscription_id)
+        logger.info(f"LS order_refunded: transaction {transaction.transaction_id} marked as refunded")
+
+    subscriptions = []
+    if subscription_ids:
+        subscriptions = db.query(VIPSubscription).filter(
+            VIPSubscription.subscription_id.in_(subscription_ids)
+        ).all()
+
     for sub in subscriptions:
-        sub.payment_status = "refunded"
+        sub.payment_status = "expired"
         sub.is_auto_renew = False
-        sub.cancelled_at = get_vietnam_time().replace(tzinfo=None)
-        sub.end_date = get_vietnam_time().replace(tzinfo=None)  # Expire immediately
+        sub.cancelled_at = now
+        if sub.end_date > now:
+            sub.end_date = now  # Expire immediately
 
         # Cancel the LS subscription if still active
         if sub.ls_subscription_id:
@@ -581,12 +590,24 @@ async def _handle_order_refunded(event: dict, event_data: dict, attrs: dict, db:
             except Exception as e:
                 logger.warning(f"LS order_refunded: failed to cancel LS sub {sub.ls_subscription_id}: {e}")
 
-    # Deactivate user VIP
-    user = db.query(User).filter(User.user_id == user_id).first()
+    db.flush()
+
+    # Recompute the user's VIP flag/expiry from the purchases that remain
+    user = db.query(User).filter(User.user_id == user_id).first() if user_id else None
     if user:
-        user.is_vip = False
-        user.vip_expiry = get_vietnam_time().replace(tzinfo=None)
-        logger.info(f"LS order_refunded: VIP DEACTIVATED for user_id={user_id}")
+        remaining = db.query(VIPSubscription).filter(
+            VIPSubscription.user_id == user.user_id,
+            VIPSubscription.end_date > now,
+            VIPSubscription.payment_status == "completed",
+        ).order_by(VIPSubscription.end_date.desc()).first()
+        if remaining:
+            user.is_vip = True
+            user.vip_expiry = remaining.end_date
+            logger.info(f"LS order_refunded: user_id={user.user_id} keeps VIP until {remaining.end_date}")
+        else:
+            user.is_vip = False
+            user.vip_expiry = now
+            logger.info(f"LS order_refunded: VIP DEACTIVATED for user_id={user.user_id}")
 
     db.commit()
 
