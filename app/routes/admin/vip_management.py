@@ -9,9 +9,21 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy import func, case, select
 from pydantic import BaseModel
 from app.utils.datetime_utils import get_vietnam_time
-from app.utils.currency import vnd_to_usd
+from app.utils.currency import vnd_to_usd, USD_VND_RATE
 
 router = APIRouter()
+
+# Lemon Squeezy rows store the USD charged; PayOS rows store VND. The admin UI reads
+# every transaction amount as VND, so LS amounts are converted at the site rate.
+_AMOUNT_VND = case(
+    (PackageTransaction.payment_method == "lemonsqueezy", PackageTransaction.amount * USD_VND_RATE),
+    else_=PackageTransaction.amount,
+)
+
+
+def _amount_vnd(tx) -> float:
+    amount = float(tx.amount or 0)
+    return amount * USD_VND_RATE if tx.payment_method == "lemonsqueezy" else amount
 
 # Skills sold as single-skill packages. Speaking is only ever sold this way: the
 # 'all_skills' bundle covers Listening + Reading (app/utils/vip_access.py).
@@ -204,7 +216,7 @@ async def get_all_subscriptions(
         if transaction:
             transaction_info = {
                 "transaction_id": transaction.transaction_id,
-                "amount": float(transaction.amount),
+                "amount": _amount_vnd(transaction),
                 "payment_method": transaction.payment_method,
                 "status": transaction.status,
                 "admin_note": transaction.admin_note,
@@ -240,7 +252,7 @@ async def get_pending_transactions(
         "transaction_id": tx.transaction_id,
         "user_email": tx.user.email,
         "package_name": tx.package.name,
-        "amount": tx.amount,
+        "amount": _amount_vnd(tx),
         "payment_method": tx.payment_method,
         "bank_description": tx.bank_description,
         "transaction_code": tx.transaction_code,
@@ -364,7 +376,7 @@ async def get_packages_dashboard(
             "transaction_id": tx.transaction_id,
             "user_email": tx.user.email,
             "package_name": tx.package.name,
-            "amount": float(tx.amount),
+            "amount": _amount_vnd(tx),
             "status": tx.status,
             "created_at": tx.created_at
         } for tx in recent_transactions]
@@ -382,27 +394,27 @@ async def get_total_revenue(
     now = get_vietnam_time().replace(tzinfo=None)
 
     # Calculate total revenue
-    total_revenue = db.query(func.sum(PackageTransaction.amount)).filter(
+    total_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed"
     ).scalar() or 0
 
     # Today's revenue
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_revenue = db.query(func.sum(PackageTransaction.amount)).filter(
+    today_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
         PackageTransaction.created_at >= today_start
     ).scalar() or 0
 
     # This month's revenue
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month_revenue = db.query(func.sum(PackageTransaction.amount)).filter(
+    month_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
         PackageTransaction.created_at >= month_start
     ).scalar() or 0
 
     # This year's revenue
     year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    year_revenue = db.query(func.sum(PackageTransaction.amount)).filter(
+    year_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
         PackageTransaction.created_at >= year_start
     ).scalar() or 0
@@ -411,7 +423,7 @@ async def get_total_revenue(
     twelve_weeks_ago = now - timedelta(weeks=12)
     weekly_revenue_raw = db.query(
         func.date(PackageTransaction.created_at).label('date'),
-        func.sum(PackageTransaction.amount).label('revenue')
+        func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
         PackageTransaction.created_at >= twelve_weeks_ago
@@ -443,7 +455,7 @@ async def get_total_revenue(
     current_year = now.year
     monthly_revenue = db.query(
         func.extract('month', PackageTransaction.created_at).label('month'),
-        func.sum(PackageTransaction.amount).label('revenue')
+        func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
         func.extract('year', PackageTransaction.created_at) == current_year
@@ -456,7 +468,7 @@ async def get_total_revenue(
     # Yearly revenue
     yearly_revenue = db.query(
         func.extract('year', PackageTransaction.created_at).label('year'),
-        func.sum(PackageTransaction.amount).label('revenue')
+        func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed"
     ).group_by(
@@ -486,7 +498,7 @@ def _revenue_events():
     """Every payment actually taken in, as (amount, created_at) rows. The global site
     has one revenue source: completed VIP package transactions."""
     return select(
-        PackageTransaction.amount.label("amount"),
+        _AMOUNT_VND.label("amount"),
         PackageTransaction.created_at.label("created_at"),
     ).where(PackageTransaction.status == "completed").subquery()
 
