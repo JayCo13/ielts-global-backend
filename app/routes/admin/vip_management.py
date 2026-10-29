@@ -395,13 +395,15 @@ async def get_total_revenue(
 
     # Calculate total revenue
     total_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
-        PackageTransaction.status == "completed"
+        PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy"
     ).scalar() or 0
 
     # Today's revenue
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
         PackageTransaction.created_at >= today_start
     ).scalar() or 0
 
@@ -409,6 +411,7 @@ async def get_total_revenue(
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
         PackageTransaction.created_at >= month_start
     ).scalar() or 0
 
@@ -416,6 +419,7 @@ async def get_total_revenue(
     year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     year_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
         PackageTransaction.created_at >= year_start
     ).scalar() or 0
 
@@ -426,6 +430,7 @@ async def get_total_revenue(
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
         PackageTransaction.created_at >= twelve_weeks_ago
     ).group_by(
         func.date(PackageTransaction.created_at)
@@ -458,6 +463,7 @@ async def get_total_revenue(
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
         func.extract('year', PackageTransaction.created_at) == current_year
     ).group_by(
         func.extract('month', PackageTransaction.created_at)
@@ -470,7 +476,8 @@ async def get_total_revenue(
         func.extract('year', PackageTransaction.created_at).label('year'),
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
-        PackageTransaction.status == "completed"
+        PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy"
     ).group_by(
         func.extract('year', PackageTransaction.created_at)
     ).order_by(
@@ -496,11 +503,14 @@ async def get_total_revenue(
 
 def _revenue_events():
     """Every payment actually taken in, as (amount, created_at) rows. The global site
-    has one revenue source: completed VIP package transactions."""
+    counts Lemon Squeezy orders only: completed LS package transactions."""
     return select(
         _AMOUNT_VND.label("amount"),
         PackageTransaction.created_at.label("created_at"),
-    ).where(PackageTransaction.status == "completed").subquery()
+    ).where(
+        PackageTransaction.status == "completed",
+        PackageTransaction.payment_method == "lemonsqueezy",
+    ).subquery()
 
 
 @router.get("/dashboard/revenue-detail", response_model=dict)
