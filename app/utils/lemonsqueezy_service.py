@@ -53,15 +53,24 @@ def create_checkout(
     custom_data: dict,
     user_email: str = "",
     user_name: str = "",
+    custom_price: Optional[int] = None,
+    product_name: Optional[str] = None,
+    product_description: Optional[str] = None,
+    redirect_url: Optional[str] = None,
 ) -> dict:
     """
-    Create a Lemon Squeezy checkout session (subscription).
+    Create a Lemon Squeezy checkout session (subscription or single payment —
+    whichever the variant is configured as in the LS dashboard).
 
     Args:
         variant_id: The LS variant ID for the product/plan
         custom_data: Dict with user_id, package_id etc. for webhook tracking
         user_email: Pre-fill customer email
         user_name: Pre-fill customer name
+        custom_price: Optional price override in cents (USD)
+        product_name: Optional product name shown on the checkout/receipt
+        product_description: Optional product description shown on the checkout
+        redirect_url: Optional post-purchase redirect (defaults to /my-vip-package)
 
     Returns:
         dict with 'checkout_url' and 'checkout_id'
@@ -88,7 +97,7 @@ def create_checkout(
                 },
                 "product_options": {
                     "enabled_variants": [int(variant_id)],
-                    "redirect_url": os.getenv(
+                    "redirect_url": redirect_url or os.getenv(
                         "FRONTEND_URL",
                         "https://englishoncomputer.com"
                     ) + "/my-vip-package",
@@ -115,6 +124,14 @@ def create_checkout(
             },
         }
     }
+
+    attributes = payload["data"]["attributes"]
+    if custom_price is not None:
+        attributes["custom_price"] = int(custom_price)
+    if product_name:
+        attributes["product_options"]["name"] = product_name
+    if product_description:
+        attributes["product_options"]["description"] = product_description
 
     with httpx.Client(timeout=30.0) as client:
         response = client.post(

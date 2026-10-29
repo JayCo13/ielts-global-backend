@@ -4,7 +4,8 @@ Receives payment/subscription notifications from Lemon Squeezy.
 Security: HMAC-SHA256 signature verification, idempotency checks.
 
 Handled events:
-- order_created: Log the order, create transaction record
+- order_created: Log the order; for one-time checkouts (custom_data.checkout_type
+  == "one_time") create the VIP subscription + transaction and activate VIP
 - subscription_created: Create VIP subscription, activate VIP
 - subscription_payment_success: Extend VIP (renewal payment)
 - subscription_cancelled: Mark subscription as cancelling (grace period)
@@ -19,6 +20,8 @@ from app.models.models import (
 )
 from app.utils.lemonsqueezy_service import verify_webhook_signature
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.vip_access import package_covers
+from app.utils.currency import vnd_to_usd
 from datetime import timedelta
 import json
 import logging
@@ -146,9 +149,104 @@ async def _handle_order_created(event: dict, event_data: dict, attrs: dict, db: 
         logger.info(f"LS order_created: updated existing transaction for order {ls_order_id}")
         return
 
+    if custom_data.get("checkout_type") == "one_time":
+        _activate_one_time_order(custom_data, ls_order_id, attrs, amount, db)
+        return
+
     logger.info(
         f"LS order_created: user_id={user_id}, package_id={package_id}, "
         f"order_id={ls_order_id}, amount=${amount:.2f}"
+    )
+
+
+def _activate_one_time_order(custom_data: dict, ls_order_id: str, attrs: dict, amount: float, db: Session):
+    """
+    One-time (single payment) purchase: grant duration_months * 30 days of VIP.
+    No LS subscription exists, so ls_subscription_id stays NULL and is_auto_renew False.
+    Stacking mirrors the PayOS /purchase endpoint: the new period starts when the
+    latest active subscription covering the same skill ends.
+    """
+    order_status = attrs.get("status")
+    if order_status != "paid":
+        logger.warning(f"LS order_created (one_time): order {ls_order_id} status={order_status}, not activating")
+        return
+
+    user_id = int(custom_data["user_id"])
+    package_id = int(custom_data["package_id"])
+
+    package = db.query(VIPPackage).filter(VIPPackage.package_id == package_id).first()
+    if not package:
+        logger.error(f"LS order_created (one_time): package {package_id} not found, order={ls_order_id}")
+        return
+
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        logger.error(f"LS order_created (one_time): user {user_id} not found, order={ls_order_id}")
+        return
+
+    expected_cents = custom_data.get("price_cents")
+    subtotal = attrs.get("subtotal")
+    if expected_cents and subtotal is not None and int(subtotal) != int(expected_cents):
+        # Not fatal: a discount code or tax setting can change it. Logged for review.
+        logger.warning(
+            f"LS order_created (one_time): subtotal {subtotal} != expected {expected_cents} cents, "
+            f"order={ls_order_id}"
+        )
+
+    now = get_vietnam_time().replace(tzinfo=None)
+    if package.package_type == "single_skill":
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == user_id,
+            VIPSubscription.end_date > now,
+            VIPSubscription.payment_status == "completed",
+            package_covers(package.skill_type)
+        ).order_by(VIPSubscription.end_date.desc()).first()
+    else:
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == user_id,
+            VIPSubscription.end_date > now,
+            VIPSubscription.payment_status == "completed",
+            VIPPackage.package_type == "all_skills"
+        ).order_by(VIPSubscription.end_date.desc()).first()
+
+    start_date = active_subscription.end_date if active_subscription else now
+    end_date = start_date + timedelta(days=package.duration_months * 30)
+
+    subscription = VIPSubscription(
+        user_id=user_id,
+        package_id=package_id,
+        start_date=start_date,
+        end_date=end_date,
+        payment_status="completed",
+        ls_customer_id=str(attrs.get("customer_id", "")) or None,
+        is_auto_renew=False,
+        created_at=now,
+    )
+    db.add(subscription)
+    db.flush()
+
+    transaction = PackageTransaction(
+        user_id=user_id,
+        package_id=package_id,
+        subscription_id=subscription.subscription_id,
+        amount=amount if amount > 0 else vnd_to_usd(package.price),  # USD, like other LS rows
+        payment_method="lemonsqueezy",
+        ls_order_id=ls_order_id,
+        status="completed",
+        admin_note="Lemon Squeezy one-time order",
+        created_at=now,
+    )
+    db.add(transaction)
+
+    user.is_vip = True
+    if user.vip_expiry is None or end_date > user.vip_expiry:
+        user.vip_expiry = end_date
+
+    db.commit()
+
+    logger.info(
+        f"LS order_created (one_time) SUCCESS: user_id={user_id}, package={package.name}, "
+        f"order={ls_order_id}, end_date={end_date}"
     )
 
 

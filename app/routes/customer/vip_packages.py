@@ -150,8 +150,13 @@ async def create_checkout(
     db: Session = Depends(get_db)
 ):
     """
-    Create a Lemon Squeezy checkout session for a VIP package subscription.
+    Create a Lemon Squeezy checkout session for a one-time VIP package purchase.
     Returns a checkout URL that the frontend opens as an overlay.
+
+    The LS store sells single payments (no auto-renew): the order_created webhook
+    activates VIP for duration_months * 30 days. The charge is overridden to the
+    package's USD display price (custom_price), so the variant's own dashboard
+    price does not need to match each package.
     """
     from app.utils.lemonsqueezy_service import create_checkout as ls_create_checkout
 
@@ -166,7 +171,16 @@ async def create_checkout(
             detail="Package not found or not available"
         )
     
-    if not package.ls_variant_id:
+    # Per-package variant, else one shared single-payment variant for every package
+    variant_id = package.ls_variant_id or os.getenv("LEMONSQUEEZY_DEFAULT_VARIANT_ID")
+    if not variant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This package is not configured for payment yet. Please contact support."
+        )
+
+    price_usd = vnd_to_usd(package.price)
+    if price_usd <= 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This package is not configured for payment yet. Please contact support."
@@ -188,14 +202,24 @@ async def create_checkout(
     
     # Create Lemon Squeezy checkout
     try:
+        frontend_url = os.getenv("FRONTEND_URL", "https://englishoncomputer.com")
         result = ls_create_checkout(
-            variant_id=package.ls_variant_id,
+            variant_id=variant_id,
             custom_data={
                 "user_id": str(current_user.user_id),
                 "package_id": str(package_id),
+                "checkout_type": "one_time",
+                "price_cents": str(int(round(price_usd * 100))),
             },
             user_email=current_user.email or "",
             user_name=current_user.username or "",
+            custom_price=int(round(price_usd * 100)),
+            product_name=package.name,
+            product_description=(
+                f"{package.duration_months} month{'s' if package.duration_months > 1 else ''} "
+                "of VIP access. One-time payment, no automatic renewal."
+            ),
+            redirect_url=frontend_url + "/payment-processing",
         )
         
         return {
@@ -204,6 +228,7 @@ async def create_checkout(
             "checkout_id": result["checkout_id"],
             "package_name": package.name,
             "price": float(package.price),
+            "price_usd": price_usd,
         }
     except Exception as e:
         logger.error(f"Lemon Squeezy checkout creation failed: {e}", exc_info=True)
