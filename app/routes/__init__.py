@@ -9,6 +9,7 @@ from .student.student_actions import router as student_actions_router
 from .customer.vip_packages import router as customer_vip_router
 from .customer.lemonsqueezy_webhook import router as lemonsqueezy_webhook_router
 from .customer.payos_webhook import router as payos_webhook_router
+from .customer.ninepay_webhook import router as ninepay_webhook_router
 from .AI.ai import router as ai_router
 from .AI.writing_ai import router as writing_ai_router
 from .student.writing_custom import router as writing_custom_router
@@ -60,6 +61,7 @@ router.include_router(student_reading_router, prefix="/student/reading", tags=["
 router.include_router(customer_vip_router, prefix="/customer/vip", tags=["customer-vip"])
 router.include_router(lemonsqueezy_webhook_router, prefix="/customer/vip", tags=["lemonsqueezy-webhook"])
 router.include_router(payos_webhook_router, prefix="/customer/vip", tags=["payos-webhook"])
+router.include_router(ninepay_webhook_router, prefix="/customer/vip", tags=["ninepay-webhook"])
 router.include_router(student_multiple_actions_router, prefix="/student/action", tags=["student-actions"])
 router.include_router(multiple_actions_router, prefix="/admin/action", tags=["admin-actions"])
 router.include_router(ai_router, prefix="/ai", tags=["ai"])

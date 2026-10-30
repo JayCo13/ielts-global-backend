@@ -13,6 +13,9 @@ from app.utils.currency import vnd_to_usd, USD_VND_RATE
 
 router = APIRouter()
 
+# Revenue counts Lemon Squeezy and 9Pay orders (not PayOS)
+_REVENUE_METHODS = ("lemonsqueezy", "9pay")
+
 # Lemon Squeezy rows store the USD charged; PayOS rows store VND. The admin UI reads
 # every transaction amount as VND, so LS amounts are converted at the site rate.
 _AMOUNT_VND = case(
@@ -396,14 +399,14 @@ async def get_total_revenue(
     # Calculate total revenue
     total_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy"
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS)
     ).scalar() or 0
 
     # Today's revenue
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
         PackageTransaction.created_at >= today_start
     ).scalar() or 0
 
@@ -411,7 +414,7 @@ async def get_total_revenue(
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
         PackageTransaction.created_at >= month_start
     ).scalar() or 0
 
@@ -419,7 +422,7 @@ async def get_total_revenue(
     year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
     year_revenue = db.query(func.sum(_AMOUNT_VND)).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
         PackageTransaction.created_at >= year_start
     ).scalar() or 0
 
@@ -430,7 +433,7 @@ async def get_total_revenue(
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
         PackageTransaction.created_at >= twelve_weeks_ago
     ).group_by(
         func.date(PackageTransaction.created_at)
@@ -463,7 +466,7 @@ async def get_total_revenue(
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
         func.extract('year', PackageTransaction.created_at) == current_year
     ).group_by(
         func.extract('month', PackageTransaction.created_at)
@@ -477,7 +480,7 @@ async def get_total_revenue(
         func.sum(_AMOUNT_VND).label('revenue')
     ).filter(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy"
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS)
     ).group_by(
         func.extract('year', PackageTransaction.created_at)
     ).order_by(
@@ -503,13 +506,13 @@ async def get_total_revenue(
 
 def _revenue_events():
     """Every payment actually taken in, as (amount, created_at) rows. The global site
-    counts Lemon Squeezy orders only: completed LS package transactions."""
+    counts Lemon Squeezy and 9Pay orders: completed package transactions of _REVENUE_METHODS."""
     return select(
         _AMOUNT_VND.label("amount"),
         PackageTransaction.created_at.label("created_at"),
     ).where(
         PackageTransaction.status == "completed",
-        PackageTransaction.payment_method == "lemonsqueezy",
+        PackageTransaction.payment_method.in_(_REVENUE_METHODS),
     ).subquery()
 
 

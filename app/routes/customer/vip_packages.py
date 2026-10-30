@@ -395,6 +395,165 @@ async def purchase_package(
         )
 
 
+@router.post("/packages/{package_id}/ninepay-checkout", response_model=dict)
+async def create_ninepay_checkout(
+    package_id: int,
+    current_user: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a 9Pay international-card payment URL for a one-time VIP package purchase.
+    Runs alongside Lemon Squeezy: the card is charged package.price in VND and the
+    9Pay IPN (routes/customer/ninepay_webhook.py) activates the VIP.
+    """
+    import time
+    from app.utils import ninepay_service
+
+    if not ninepay_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Card payment via 9Pay is not available right now."
+        )
+
+    package = db.query(VIPPackage).filter(
+        VIPPackage.package_id == package_id,
+        VIPPackage.is_active == True
+    ).first()
+
+    if not package:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Package not found or not available"
+        )
+
+    # 9Pay accepts 10,000 – 200,000,000 VND per transaction
+    if not (10000 <= int(package.price) <= 200000000):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This package cannot be paid with 9Pay."
+        )
+
+    # Rate limiting: max 20 payment requests per user per 5 minutes
+    five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
+    recent_count = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.created_at >= five_min_ago,
+        PackageTransaction.status != "reject"
+    ).count()
+
+    if recent_count >= 20:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many payment requests. Please try again later."
+        )
+
+    # Cancel existing pending 9Pay transactions for same user+package (abandoned card forms)
+    existing_pending = db.query(PackageTransaction).filter(
+        PackageTransaction.user_id == current_user.user_id,
+        PackageTransaction.package_id == package_id,
+        PackageTransaction.status == "pending",
+        PackageTransaction.payment_method == "9pay",
+    ).all()
+
+    for old_txn in existing_pending:
+        old_txn.status = "reject"
+        old_txn.admin_note = "Auto-cancelled: new transaction created"
+        if old_txn.subscription_id:
+            old_sub = db.query(VIPSubscription).filter(
+                VIPSubscription.subscription_id == old_txn.subscription_id
+            ).first()
+            if old_sub and old_sub.payment_status == "pending":
+                old_sub.payment_status = "reject"
+    if existing_pending:
+        db.commit()
+
+    # Subscription stacking, same rule as the PayOS purchase above
+    if package.package_type == "single_skill":
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == current_user.user_id,
+            VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+            VIPSubscription.payment_status == "completed",
+            package_covers(package.skill_type)
+        ).order_by(VIPSubscription.end_date.desc()).first()
+    else:
+        active_subscription = db.query(VIPSubscription).join(VIPPackage).filter(
+            VIPSubscription.user_id == current_user.user_id,
+            VIPSubscription.end_date > get_vietnam_time().replace(tzinfo=None),
+            VIPSubscription.payment_status == "completed",
+            VIPPackage.package_type == "all_skills"
+        ).order_by(VIPSubscription.end_date.desc()).first()
+
+    if active_subscription:
+        start_date = active_subscription.end_date
+    else:
+        start_date = get_vietnam_time().replace(tzinfo=None)
+
+    end_date = start_date + timedelta(days=package.duration_months * 30)
+
+    # Create subscription (pending)
+    subscription = VIPSubscription(
+        user_id=current_user.user_id,
+        package_id=package_id,
+        start_date=start_date,
+        end_date=end_date,
+        payment_status="pending",
+        created_at=get_vietnam_time().replace(tzinfo=None)
+    )
+    db.add(subscription)
+    db.commit()
+    db.refresh(subscription)
+
+    # Unique merchant invoice number (9Pay max 30 chars)
+    invoice_no = f"EOC{subscription.subscription_id}T{int(time.time())}"
+
+    # Create transaction record; amount is VND, like PayOS rows
+    transaction = PackageTransaction(
+        user_id=current_user.user_id,
+        package_id=package_id,
+        subscription_id=subscription.subscription_id,
+        amount=package.price,
+        payment_method="9pay",
+        status="pending",
+        transaction_code=invoice_no,
+        created_at=get_vietnam_time().replace(tzinfo=None)
+    )
+    db.add(transaction)
+    db.commit()
+    db.refresh(transaction)
+
+    try:
+        frontend_url = os.getenv("FRONTEND_URL", "https://englishoncomputer.com").rstrip("/")
+        return_url = os.getenv("NINEPAY_RETURN_URL", f"{frontend_url}/payment-processing")
+        return_url = f"{return_url}?provider=9pay&invoice={invoice_no}"
+        description = f"EnglishOnComputer VIP - {package.name}"[:255]
+
+        checkout_url = ninepay_service.create_payment_url(
+            invoice_no=invoice_no,
+            amount=int(package.price),
+            description=description,
+            return_url=return_url,
+            back_url=f"{frontend_url}/vip-packages",
+        )
+
+        return {
+            "message": "Payment link created successfully",
+            "transaction_id": transaction.transaction_id,
+            "invoice_no": invoice_no,
+            "checkoutUrl": checkout_url,
+            "amount_vnd": int(package.price),
+            "status": "pending"
+        }
+    except Exception as e:
+        logger.error(f"9Pay payment URL creation failed: {e}", exc_info=True)
+        db.delete(transaction)
+        db.delete(subscription)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create payment link. Please try again later."
+        )
+
+
 @router.post("/subscription/cancel", response_model=dict)
 async def cancel_subscription(
     current_user: User = Depends(get_current_student),
