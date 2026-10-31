@@ -1926,13 +1926,13 @@ async def get_admin_notifications(
     
 
 
-    # Get recent completed Lemon Squeezy transactions only (success notifications)
+    # Get recent completed Lemon Squeezy and 9Pay transactions only (success notifications)
     recent_transactions = db.query(PackageTransaction, User, VIPPackage)\
         .join(User, User.user_id == PackageTransaction.user_id)\
         .join(VIPPackage, VIPPackage.package_id == PackageTransaction.package_id)\
         .filter(
             PackageTransaction.created_at >= get_vietnam_time().replace(tzinfo=None) - timedelta(days=days),
-            PackageTransaction.payment_method == "lemonsqueezy",
+            PackageTransaction.payment_method.in_(("lemonsqueezy", "9pay")),
             PackageTransaction.status == "completed"
         )\
         .order_by(PackageTransaction.created_at.desc())\
@@ -1944,7 +1944,10 @@ async def get_admin_notifications(
     # Add transaction notifications
     for transaction, user, package in recent_transactions:
         # Set title/message based on status
-        if transaction.status == "completed" and transaction.payment_method == "lemonsqueezy":
+        if transaction.status == "completed" and transaction.payment_method == "9pay":
+            title = "Payment Successful"
+            message = f"{user.username} purchased {package.name} ({float(transaction.amount):,.0f} VND via 9Pay)"
+        elif transaction.status == "completed" and transaction.payment_method == "lemonsqueezy":
             title = "Payment Successful"
             message = f"{user.username} purchased {package.name} (${float(transaction.amount):.2f})"
         elif transaction.status == "reject" and transaction.payment_method == "lemonsqueezy":
