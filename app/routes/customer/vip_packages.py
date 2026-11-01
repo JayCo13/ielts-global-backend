@@ -398,11 +398,12 @@ async def purchase_package(
 @router.post("/packages/{package_id}/ninepay-checkout", response_model=dict)
 async def create_ninepay_checkout(
     package_id: int,
+    method: str = "CREDIT_CARD",
     current_user: User = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
     """
-    Create a 9Pay international-card payment URL for a one-time VIP package purchase.
+    Create a 9Pay payment URL (card, Apple Pay or Google Pay via ?method=) for a one-time VIP package purchase.
     Runs alongside Lemon Squeezy: the card is charged package.price in VND and the
     9Pay IPN (routes/customer/ninepay_webhook.py) activates the VIP.
     """
@@ -426,8 +427,16 @@ async def create_ninepay_checkout(
             detail="Package not found or not available"
         )
 
-    # 9Pay accepts 10,000 – 200,000,000 VND per transaction
-    if not (10000 <= int(package.price) <= 200000000):
+    method = (method or "CREDIT_CARD").upper()
+    if method not in ninepay_service.METHOD_LIMITS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported payment method."
+        )
+
+    # 9Pay per-transaction VND limits depend on the method
+    min_vnd, max_vnd = ninepay_service.METHOD_LIMITS[method]
+    if not (min_vnd <= int(package.price) <= max_vnd):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This package cannot be paid with 9Pay."
@@ -533,6 +542,7 @@ async def create_ninepay_checkout(
             description=description,
             return_url=return_url,
             back_url=f"{frontend_url}/vip-packages",
+            method=method,
         )
 
         return {

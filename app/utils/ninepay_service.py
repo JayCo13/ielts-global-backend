@@ -22,6 +22,13 @@ SANDBOX_ENDPOINT = "https://sand-payment.9pay.vn"
 STATUS_SUCCESS = 5
 FAILED_STATUSES = {6, 8, 9}   # failed, cancelled, rejected by risk management
 
+# Redirect methods we offer, with their per-transaction VND limits
+METHOD_LIMITS = {
+    "CREDIT_CARD": (10000, 200000000),
+    "APPLE_PAY": (10000, 100000000),
+    "GOOGLE_PAY": (10000, 100000000),
+}
+
 
 def _config():
     merchant_key = os.getenv("NINEPAY_MERCHANT_KEY")
@@ -56,9 +63,9 @@ def _http_query(params: dict) -> str:
 
 
 def create_payment_url(invoice_no: str, amount: int, description: str, return_url: str,
-                       back_url: str = None, lang: str = "en") -> str:
+                       back_url: str = None, lang: str = "en", method: str = "CREDIT_CARD") -> str:
     """Build the signed 9Pay portal URL the customer is redirected to.
-    Amount is VND (9Pay limits: 10,000 – 200,000,000)."""
+    Amount is VND (limits per method in METHOD_LIMITS)."""
     merchant_key, secret_key, _, endpoint = _config()
     now = int(time.time())
     params = {
@@ -69,7 +76,7 @@ def create_payment_url(invoice_no: str, amount: int, description: str, return_ur
         "description": description,
         "return_url": return_url,
         "back_url": back_url or return_url,
-        "method": "CREDIT_CARD",
+        "method": method,
         "currency": "VND",
         "lang": lang,
     }

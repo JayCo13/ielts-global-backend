@@ -50,7 +50,7 @@ def apply_ninepay_result(transaction: PackageTransaction, data: dict, db: Sessio
 
     if status_code == ninepay_service.STATUS_SUCCESS:
         transaction.status = "completed"
-        transaction.admin_note = f"Auto-confirmed by 9Pay ({source}), payment_no={payment_no}"
+        transaction.admin_note = f"Auto-confirmed by 9Pay ({source}), payment_no={payment_no}, method={data.get('method') or '-'}"
         if subscription:
             subscription.payment_status = "completed"
 
