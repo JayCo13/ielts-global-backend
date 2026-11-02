@@ -18,6 +18,7 @@ from app.models.models import User, EmailBroadcast
 from app.routes.admin.auth import get_current_admin
 from app.utils.email_service import send_single_email
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.recipient_filter import build_recipients
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,6 +35,13 @@ class BroadcastRequest(BaseModel):
     subject: str
     body_html: str
     target_filter: str = "non_vip"  # non_vip, all, vip
+    only_trusted: bool = True  # skip addresses with no sign of a real inbox (see utils/recipient_filter.py)
+
+
+def _split_filter(stored: str):
+    """EmailBroadcast.target_filter stores e.g. 'non_vip+trusted'."""
+    base, _, flag = (stored or "non_vip").partition("+")
+    return base, flag == "trusted"
 
 
 def _run_broadcast(broadcast_id: int):
@@ -45,27 +53,9 @@ def _run_broadcast(broadcast_id: int):
             logger.error(f"Broadcast {broadcast_id} not found")
             return
 
-        # Build user query based on target filter
-        query = db.query(User.email).filter(User.is_active == True)
-        if broadcast.target_filter == 'non_vip':
-            query = query.filter(and_(
-                User.is_vip == False,
-                User.email.isnot(None),
-                User.email != ''
-            ))
-        elif broadcast.target_filter == 'vip':
-            query = query.filter(and_(
-                User.is_vip == True,
-                User.email.isnot(None),
-                User.email != ''
-            ))
-        else:  # all
-            query = query.filter(and_(
-                User.email.isnot(None),
-                User.email != ''
-            ))
-
-        emails = [row[0] for row in query.all() if row[0] and EMAIL_REGEX.match(row[0])]
+        target_filter, only_trusted = _split_filter(broadcast.target_filter)
+        emails, stats = build_recipients(db, target_filter, only_trusted)
+        logger.info(f"Broadcast {broadcast_id} recipients after filtering: {stats}")
 
         broadcast.total_recipients = len(emails)
         broadcast.status = 'sending'
@@ -120,26 +110,20 @@ def _run_broadcast(broadcast_id: int):
 
 
 @router.get("/email/recipients-count")
-async def get_recipients_count(
+def get_recipients_count(
     target_filter: str = "non_vip",
+    only_trusted: bool = True,
     current_admin=Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Get the count of recipients that would receive the email."""
-    query = db.query(User).filter(User.is_active == True)
-    if target_filter == 'non_vip':
-        query = query.filter(and_(User.is_vip == False, User.email.isnot(None), User.email != ''))
-    elif target_filter == 'vip':
-        query = query.filter(and_(User.is_vip == True, User.email.isnot(None), User.email != ''))
-    else:
-        query = query.filter(and_(User.email.isnot(None), User.email != ''))
-
-    count = query.count()
-    return {"count": count, "target_filter": target_filter}
+    """Count of recipients after filtering, with how many each filter removed.
+    Plain def: the domain checks do DNS lookups, so this runs in the threadpool."""
+    emails, stats = build_recipients(db, target_filter, only_trusted)
+    return {"count": len(emails), "target_filter": target_filter, "only_trusted": only_trusted, "stats": stats}
 
 
 @router.post("/email/broadcast")
-async def create_broadcast(
+def create_broadcast(
     req: BroadcastRequest,
     current_admin=Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -153,16 +137,9 @@ async def create_broadcast(
     if active:
         raise HTTPException(status_code=409, detail="Another broadcast is currently in progress. Please wait for it to complete.")
 
-    # Enforce recipient cap before allocating any work or fetching email rows.
-    # Uses .count() so we don't pull the full address list into memory just to size it.
-    count_query = db.query(User).filter(User.is_active == True)
-    if req.target_filter == 'non_vip':
-        count_query = count_query.filter(and_(User.is_vip == False, User.email.isnot(None), User.email != ''))
-    elif req.target_filter == 'vip':
-        count_query = count_query.filter(and_(User.is_vip == True, User.email.isnot(None), User.email != ''))
-    else:
-        count_query = count_query.filter(and_(User.email.isnot(None), User.email != ''))
-    recipient_count = count_query.count()
+    # Enforce recipient cap before allocating any work (same filtering as the send)
+    recipient_emails, _ = build_recipients(db, req.target_filter, req.only_trusted)
+    recipient_count = len(recipient_emails)
     if recipient_count > MAX_RECIPIENTS_PER_BROADCAST:
         raise HTTPException(
             status_code=400,
@@ -177,7 +154,7 @@ async def create_broadcast(
     broadcast = EmailBroadcast(
         subject=req.subject,
         body_html=req.body_html,
-        target_filter=req.target_filter,
+        target_filter=f"{req.target_filter}+trusted" if req.only_trusted else req.target_filter,
         status='pending',
         created_by=current_admin.user_id
     )
