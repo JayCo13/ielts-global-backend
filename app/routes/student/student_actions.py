@@ -646,7 +646,9 @@ async def update_student_profile(
         "message": "Profile updated successfully",
         "email": current_student.email,
         "username": current_student.username,
-        "image_url": current_student.image_url
+        "image_url": current_student.image_url,
+        "email_verified": bool(getattr(current_student, "email_verified", False)),
+        "is_google_account": bool(current_student.google_id),
     }
     
 LISTENING_EXAMS_STATIC_CACHE_KEY = "listening-exams:static:v1"
