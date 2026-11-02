@@ -187,6 +187,7 @@ async def get_student_profile(
         "image_url": image_url,
         "role": current_student.role,  # Include role for frontend verification
         "is_google_account": bool(current_student.google_id),  # True if registered via Google
+        "email_verified": bool(getattr(current_student, "email_verified", False)),
         # Dictation is granted per account (admin toggle), not only by role='student'.
         "can_dictation": bool(
             current_student.role == "student" or getattr(current_student, "can_dictation", False)
@@ -198,6 +199,108 @@ async def get_student_profile(
         "listen_top10_count": int(getattr(current_student, "listen_top10_count", 0) or 0),
         "write_top10_count": int(getattr(current_student, "write_top10_count", 0) or 0),
     }
+
+
+# ── Post-login email verification (ported from VN; signup itself stays open) ──
+
+class EmailCodeRequest(BaseModel):
+    email: str
+
+
+class EmailCodeVerifyRequest(BaseModel):
+    email: str
+    code: str
+
+
+def _verify_code_email_html(code: str) -> str:
+    return (
+        '<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;color:#1f2937">'
+        '<h2 style="margin:0 0 16px;color:#07223d">Verify your email</h2>'
+        '<p style="margin:0 0 16px">Use this code to verify the email on your EnglishOnComputer account:</p>'
+        f'<div style="font-size:32px;font-weight:bold;letter-spacing:8px;text-align:center;'
+        f'padding:16px;background:#f3f4f6;border-radius:8px;margin:0 0 16px">{code}</div>'
+        '<p style="margin:0 0 8px">The code expires in 10 minutes. Do not share it with anyone.</p>'
+        '<p style="margin:0;color:#6b7280;font-size:13px">If you did not request this, you can ignore this email.</p>'
+        '</div>'
+    )
+
+
+@router.get("/email-status", response_model=dict)
+async def student_email_status(current_student: User = Depends(get_current_student)):
+    """Email verification status for the home-page banner. Google accounts already
+    have a Google-verified email, so they are never prompted."""
+    verified = bool(getattr(current_student, "email_verified", False))
+    is_google = bool(current_student.google_id)
+    return {
+        "email": current_student.email,
+        "email_verified": verified,
+        "is_google": is_google,
+        "show_verify": (not verified) and (not is_google),
+    }
+
+
+@router.post("/email/send-code", response_model=dict)
+async def send_email_verification_code(
+    payload: EmailCodeRequest,
+    current_student: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Email a 6-digit code to verify (or set) the account's email. Allows the user's
+    own email; rejects an email used by another account."""
+    from app.routes.auth.email_verification import verify_email_domain
+    from app.utils.email_blocklist import is_disposable_email
+    from app.utils.email_utils import send_email
+    from app.utils import email_otp
+
+    email = (payload.email or "").strip().lower()
+    dom = verify_email_domain(email)
+    if not dom["valid_format"]:
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+    if not dom["domain_exists"]:
+        raise HTTPException(status_code=400, detail="This email domain does not exist or cannot receive email.")
+    if is_disposable_email(email):
+        raise HTTPException(status_code=400, detail="Please use a real personal email, not a temporary one.")
+    if db.query(User).filter(User.email == email, User.user_id != current_student.user_id).first():
+        raise HTTPException(status_code=400, detail="This email is already used by another account.")
+
+    try:
+        code = email_otp.issue_code(current_student.user_id, email)
+    except ValueError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+
+    try:
+        sent = send_email(email, "EnglishOnComputer - Your verification code", _verify_code_email_html(code))
+    except Exception as e:
+        logger.error(f"Failed to send verification code to {email}: {e}")
+        sent = False
+    if not sent:
+        raise HTTPException(status_code=502, detail="We could not send the code. Please try again.")
+    return {"success": True, "message": "A verification code has been sent to your email."}
+
+
+@router.post("/email/verify", response_model=dict)
+async def verify_email_code(
+    payload: EmailCodeVerifyRequest,
+    current_student: User = Depends(get_current_student),
+    db: Session = Depends(get_db)
+):
+    """Check the code, then save the email and mark it verified."""
+    from app.utils import email_otp
+
+    email = (payload.email or "").strip().lower()
+    if db.query(User).filter(User.email == email, User.user_id != current_student.user_id).first():
+        raise HTTPException(status_code=400, detail="This email is already used by another account.")
+    try:
+        ok = email_otp.check_code(current_student.user_id, email, payload.code)
+    except ValueError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    if not ok:
+        raise HTTPException(status_code=400, detail="The code is incorrect or has expired.")
+
+    current_student.email = email
+    current_student.email_verified = True
+    db.commit()
+    return {"success": True, "email": email, "email_verified": True}
 @router.get("/exam/{exam_id}/audio")
 async def stream_combined_audio(
     exam_id: int,
@@ -517,6 +620,9 @@ async def update_student_profile(
     db: Session = Depends(get_db)
 ):
     if email:
+        # A changed email has not been verified yet
+        if (email or "").strip().lower() != (current_student.email or "").strip().lower():
+            current_student.email_verified = False
         current_student.email = email
     
     if username:
