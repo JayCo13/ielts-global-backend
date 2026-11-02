@@ -59,12 +59,13 @@ def marketing_from() -> str:
 
 
 def send_via_resend(from_addr: str, to_email: str, subject: str, html: str,
-                    attachments: list = None) -> bool:
+                    attachments: list = None, extra_headers: dict = None) -> bool:
     """Send one email through Resend. Returns True on success, False otherwise.
 
     `attachments` is an optional list of Resend attachment dicts, e.g. an inline
     image: {"filename": "logo.png", "content": "<base64>", "content_id": "brandlogo"}
     referenced from the HTML as <img src="cid:brandlogo">.
+    `extra_headers` are email headers, e.g. List-Unsubscribe for marketing.
     """
     api_key = os.getenv("RESEND_API_KEY")
     if not api_key:
@@ -78,6 +79,8 @@ def send_via_resend(from_addr: str, to_email: str, subject: str, html: str,
     }
     if attachments:
         payload["attachments"] = attachments
+    if extra_headers:
+        payload["headers"] = extra_headers
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -103,6 +106,14 @@ def send_via_resend(from_addr: str, to_email: str, subject: str, html: str,
 
         if resp.status_code // 100 == 2:
             return True
+        # 429 is the rate limit: wait as long as Resend asks, then try again.
+        if resp.status_code == 429 and time.monotonic() < deadline:
+            try:
+                wait = float(resp.headers.get("retry-after", 1))
+            except ValueError:
+                wait = 1.0
+            time.sleep(min(max(wait, 0.5), 5.0))
+            continue
         # 5xx is Resend having a bad moment; the key makes another go harmless.
         if resp.status_code // 100 == 5 and time.monotonic() < deadline:
             time.sleep(min(0.5 * attempt, 2.0))

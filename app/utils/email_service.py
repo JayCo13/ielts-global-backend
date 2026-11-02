@@ -29,8 +29,9 @@ def _get_ses_client():
     return boto3.client("ses", region_name=SES_REGION)
 
 
-def send_single_email(to_email: str, subject: str, body_html: str) -> bool:
+def send_single_email(to_email: str, subject: str, body_html: str, headers: dict = None) -> bool:
     """Send a single marketing email. Prefers Resend when configured, else SES.
+    `headers` (e.g. List-Unsubscribe) are only sent through Resend.
 
     Returns True on success, False on failure.
     """
@@ -38,7 +39,7 @@ def send_single_email(to_email: str, subject: str, body_html: str) -> bool:
     # since bulk blasts on Resend can cost far more than SES / a bulk ESP.
     from app.utils.resend_client import resend_marketing_enabled, send_via_resend, marketing_from
     if resend_marketing_enabled():
-        return send_via_resend(marketing_from(), to_email, subject, body_html)
+        return send_via_resend(marketing_from(), to_email, subject, body_html, extra_headers=headers)
 
     if not SES_FROM_EMAIL:
         logger.error("SES_FROM_EMAIL is not configured")

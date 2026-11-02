@@ -1017,6 +1017,17 @@ class EmailBroadcast(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class EmailSuppression(Base):
+    """Addresses that must not receive marketing broadcasts: unsubscribed, hard
+    bounced or marked as spam (the last two reported by the Resend webhook)."""
+    __tablename__ = 'email_suppressions'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    reason = Column(String(20), nullable=False)  # unsubscribe, bounce, complaint
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
 class Center(Base):
     __tablename__ = 'centers'
 

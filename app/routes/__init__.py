@@ -10,6 +10,7 @@ from .customer.vip_packages import router as customer_vip_router
 from .customer.lemonsqueezy_webhook import router as lemonsqueezy_webhook_router
 from .customer.payos_webhook import router as payos_webhook_router
 from .customer.ninepay_webhook import router as ninepay_webhook_router
+from .customer.email_preferences import router as email_preferences_router
 from .AI.ai import router as ai_router
 from .AI.writing_ai import router as writing_ai_router
 from .student.writing_custom import router as writing_custom_router
@@ -62,6 +63,8 @@ router.include_router(customer_vip_router, prefix="/customer/vip", tags=["custom
 router.include_router(lemonsqueezy_webhook_router, prefix="/customer/vip", tags=["lemonsqueezy-webhook"])
 router.include_router(payos_webhook_router, prefix="/customer/vip", tags=["payos-webhook"])
 router.include_router(ninepay_webhook_router, prefix="/customer/vip", tags=["ninepay-webhook"])
+# Public: marketing unsubscribe + Resend bounce/complaint webhook (/customer/email/*)
+router.include_router(email_preferences_router, prefix="/customer", tags=["email-preferences"])
 router.include_router(student_multiple_actions_router, prefix="/student/action", tags=["student-actions"])
 router.include_router(multiple_actions_router, prefix="/admin/action", tags=["admin-actions"])
 router.include_router(ai_router, prefix="/ai", tags=["ai"])

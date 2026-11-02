@@ -19,6 +19,7 @@ from app.routes.admin.auth import get_current_admin
 from app.utils.email_service import send_single_email
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.recipient_filter import build_recipients
+from app.utils.email_suppression import with_unsubscribe_footer, unsubscribe_headers
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,12 +34,17 @@ EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 # Override via env var; defaults to 30,000 (~$3 at $0.10/1000).
 MAX_RECIPIENTS_PER_BROADCAST = int(os.getenv("MAX_RECIPIENTS_PER_BROADCAST", "30000"))
 
+# Seconds between two broadcast sends. Resend's default limit is a few requests per
+# second for the whole team, and OTP / password-reset mail shares it, so stay below.
+BROADCAST_SEND_INTERVAL = float(os.getenv("BROADCAST_SEND_INTERVAL", "0.6"))
+
 
 class BroadcastRequest(BaseModel):
     subject: str
     body_html: str
     target_filter: str = "non_vip"  # non_vip, all, vip
     only_trusted: bool = True  # skip addresses with no sign of a real inbox (see utils/recipient_filter.py)
+    max_recipients: Optional[int] = None  # send only to the N most engaged (domain warm-up)
 
 
 def _split_filter(stored: str):
@@ -47,7 +53,13 @@ def _split_filter(stored: str):
     return base, flag == "trusted"
 
 
-def _run_broadcast(broadcast_id: int):
+def _send_marketing(email: str, subject: str, body_html: str) -> bool:
+    """One broadcast email with the recipient's unsubscribe link and headers."""
+    return send_single_email(email, subject, with_unsubscribe_footer(body_html, email),
+                             headers=unsubscribe_headers(email))
+
+
+def _run_broadcast(broadcast_id: int, max_recipients: Optional[int] = None):
     """Background thread to send emails in batches."""
     db = SessionLocal()
     try:
@@ -58,7 +70,9 @@ def _run_broadcast(broadcast_id: int):
 
         target_filter, only_trusted = _split_filter(broadcast.target_filter)
         emails, stats = build_recipients(db, target_filter, only_trusted)
-        logger.info(f"Broadcast {broadcast_id} recipients after filtering: {stats}")
+        if max_recipients:
+            emails = emails[:max_recipients]
+        logger.info(f"Broadcast {broadcast_id} recipients after filtering: {stats}, limit {max_recipients}")
 
         broadcast.total_recipients = len(emails)
         broadcast.status = 'sending'
@@ -66,12 +80,11 @@ def _run_broadcast(broadcast_id: int):
 
         sent = 0
         failed = 0
-        batch_size = 40  # send 40 at a time, then pause
-        delay_between_batches = 3  # seconds between batches
 
         for i, email in enumerate(emails):
+            started = time.monotonic()
             try:
-                success = send_single_email(email, broadcast.subject, broadcast.body_html)
+                success = _send_marketing(email, broadcast.subject, broadcast.body_html)
                 if success:
                     sent += 1
                 else:
@@ -86,9 +99,10 @@ def _run_broadcast(broadcast_id: int):
                 broadcast.failed_count = failed
                 db.commit()
 
-            # Pause between batches to avoid rate limiting
-            if (i + 1) % batch_size == 0:
-                time.sleep(delay_between_batches)
+            # Even pacing to stay under the provider's rate limit
+            wait = BROADCAST_SEND_INTERVAL - (time.monotonic() - started)
+            if wait > 0:
+                time.sleep(wait)
 
         # Final update
         broadcast.sent_count = sent
@@ -141,8 +155,12 @@ def create_broadcast(
         raise HTTPException(status_code=409, detail="Another broadcast is currently in progress. Please wait for it to complete.")
 
     # Enforce recipient cap before allocating any work (same filtering as the send)
+    if req.max_recipients is not None and req.max_recipients < 1:
+        raise HTTPException(status_code=400, detail="max_recipients must be at least 1")
     recipient_emails, _ = build_recipients(db, req.target_filter, req.only_trusted)
     recipient_count = len(recipient_emails)
+    if req.max_recipients:
+        recipient_count = min(recipient_count, req.max_recipients)
     if recipient_count > MAX_RECIPIENTS_PER_BROADCAST:
         raise HTTPException(
             status_code=400,
@@ -166,7 +184,7 @@ def create_broadcast(
     db.refresh(broadcast)
 
     # Start background thread
-    thread = threading.Thread(target=_run_broadcast, args=(broadcast.id,), daemon=True)
+    thread = threading.Thread(target=_run_broadcast, args=(broadcast.id, req.max_recipients), daemon=True)
     thread.start()
 
     return {
@@ -231,7 +249,7 @@ async def send_test_email(
     if not recipients:
         raise HTTPException(status_code=400, detail="No test recipients configured")
 
-    sent = [e for e in recipients if send_single_email(e, f"[TEST] {req.subject}", req.body_html)]
+    sent = [e for e in recipients if _send_marketing(e, f"[TEST] {req.subject}", req.body_html)]
     if sent:
         failed = [e for e in recipients if e not in sent]
         msg = f"Test email sent to {', '.join(sent)}"

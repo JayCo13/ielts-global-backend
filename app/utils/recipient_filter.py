@@ -3,11 +3,16 @@ junk sign-ups (registration accepts any address; verification is optional).
 
 Always removed: bad format, disposable providers, placeholder local parts
 (noreply@, test@ …), duplicates of the same inbox (Gmail ignores dots and +tags),
-and domains with no mail server.
+domains with no mail server, and the suppression list (unsubscribed, hard bounced,
+marked as spam — see utils/email_suppression.py).
 
 With only_trusted, an address is kept only when there is a sign the inbox is real:
 email verified, Google sign-in, a completed purchase, a taken test, or recent activity
 on a day after sign-up (sign-up itself sets last_active, so it does not count).
+
+Recipients come out most engaged first (verified, Google, buyers, then test-takers,
+then the rest, each by recent activity), so a broadcast limited to the first N
+reaches the inboxes least likely to bounce or complain.
 """
 import re
 from datetime import timedelta
@@ -20,6 +25,7 @@ from sqlalchemy import and_
 from app.models.models import User, PackageTransaction, ExamResult
 from app.utils.email_blocklist import is_disposable_email
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.email_suppression import suppressed_emails
 
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
@@ -77,20 +83,29 @@ def build_recipients(db, target_filter: str = "non_vip", only_trusted: bool = Tr
         query = query.filter(User.is_vip == True)
     rows = query.order_by(User.user_id).all()
 
-    trusted_ids = set()
-    if only_trusted:
-        trusted_ids.update(r[0] for r in db.query(PackageTransaction.user_id).filter(
-            PackageTransaction.status == "completed").distinct().all())
-        trusted_ids.update(r[0] for r in db.query(ExamResult.user_id).distinct().all())
+    buyer_ids = {r[0] for r in db.query(PackageTransaction.user_id).filter(
+        PackageTransaction.status == "completed").distinct().all()}
+    taker_ids = {r[0] for r in db.query(ExamResult.user_id).distinct().all()}
+    trusted_ids = (buyer_ids | taker_ids) if only_trusted else set()
+    suppressed = suppressed_emails(db)
     active_since = get_vietnam_time().replace(tzinfo=None) - timedelta(days=ACTIVE_WITHIN_DAYS)
 
+    def engagement(row):
+        user_id, _, verified, google_id, last_active, _ = row
+        tier = 0 if (verified or google_id or user_id in buyer_ids) else 1 if user_id in taker_ids else 2
+        return (tier, -(last_active.timestamp() if last_active else 0), user_id)
+    rows.sort(key=engagement)
+
     stats = {"total": len(rows), "bad_format": 0, "disposable": 0, "placeholder": 0,
-             "duplicate": 0, "no_mail_server": 0, "untrusted": 0}
+             "suppressed": 0, "duplicate": 0, "no_mail_server": 0, "untrusted": 0}
     emails, seen = [], set()
     for user_id, raw_email, verified, google_id, last_active, created_at in rows:
         email = raw_email.strip().lower()
         if not EMAIL_REGEX.match(email):
             stats["bad_format"] += 1
+            continue
+        if email in suppressed:
+            stats["suppressed"] += 1
             continue
         if is_disposable_email(email):
             stats["disposable"] += 1
