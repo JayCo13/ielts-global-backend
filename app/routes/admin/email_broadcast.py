@@ -23,6 +23,9 @@ from app.utils.recipient_filter import build_recipients
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+# Inboxes that receive the "Send test" email. Override via env var (comma-separated).
+BROADCAST_TEST_EMAILS = os.getenv("BROADCAST_TEST_EMAILS", "taicopgm@gmail.com,cotrinhhientai@gmail.com")
+
 # Simple email validation regex
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
@@ -223,16 +226,20 @@ async def send_test_email(
     current_admin=Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
-    """Send a test email to the admin's own email address."""
-    admin_email = current_admin.email
-    if not admin_email:
-        raise HTTPException(status_code=400, detail="Admin email not found")
+    """Send a test email to the fixed test inboxes (BROADCAST_TEST_EMAILS)."""
+    recipients = [e.strip() for e in BROADCAST_TEST_EMAILS.split(",") if e.strip()]
+    if not recipients:
+        raise HTTPException(status_code=400, detail="No test recipients configured")
 
-    success = send_single_email(admin_email, f"[TEST] {req.subject}", req.body_html)
-    if success:
-        return {"message": f"Test email sent to {admin_email}"}
+    sent = [e for e in recipients if send_single_email(e, f"[TEST] {req.subject}", req.body_html)]
+    if sent:
+        failed = [e for e in recipients if e not in sent]
+        msg = f"Test email sent to {', '.join(sent)}"
+        if failed:
+            msg += f" (failed: {', '.join(failed)})"
+        return {"message": msg}
     else:
-        raise HTTPException(status_code=500, detail="Failed to send test email. Check backend logs for the SES error (likely sandbox mode requiring recipient verification, missing/incorrect SES env vars, or wrong region).")
+        raise HTTPException(status_code=500, detail="Failed to send test email. Check backend logs for the send error.")
 
 
 @router.post("/email/upload-image")
