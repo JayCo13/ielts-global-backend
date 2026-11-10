@@ -169,6 +169,10 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
 
 @router.get("/listening-forecasts", response_model=List[dict])
 async def get_public_listening_forecasts(db: Session = Depends(get_db)):
+    # Batched + Redis-cached builder (same response); FORECAST_LIST_LEGACY=1 restores the loop below.
+    if os.getenv('FORECAST_LIST_LEGACY') != '1':
+        from app.utils.forecast_list import build_public_forecast_list
+        return await build_public_forecast_list(db, 'listening')
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'
@@ -207,6 +211,10 @@ async def get_public_listening_forecasts(db: Session = Depends(get_db)):
 
 @router.get("/reading-forecasts", response_model=List[dict])
 async def get_public_reading_forecasts(db: Session = Depends(get_db)):
+    # Batched + Redis-cached builder (same response); FORECAST_LIST_LEGACY=1 restores the loop below.
+    if os.getenv('FORECAST_LIST_LEGACY') != '1':
+        from app.utils.forecast_list import build_public_forecast_list
+        return await build_public_forecast_list(db, 'reading')
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'reading'

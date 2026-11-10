@@ -19,9 +19,11 @@ from app.models.models import User, AffiliateWalletTx, AffiliateWithdrawal
 from app.routes.admin.auth import get_current_student
 from app.utils.affiliate import (
     ensure_referral_code, sync_commissions, format_amount,
-    WITHDRAW_MIN_XU, AFFILIATE_CURRENCY, UNIT_DIVISOR, COMMISSION_RATE,
+    WITHDRAW_MIN_XU, AFFILIATE_CURRENCY, UNIT_DIVISOR, COMMISSION_RATE, rate_pct_at,
 )
 from app.utils.upload_security import validate_image_bytes
+from app.routes.customer.creator_hub import affiliate_gate  # Creator Hub access (2026-11)
+from app.utils.creator_hub import referral_allowed
 from app.utils.datetime_utils import get_vietnam_time
 
 router = APIRouter()
@@ -64,8 +66,8 @@ def _mask_name(username: Optional[str], email: Optional[str]) -> str:
     return name[:3] + "***"
 
 
-@router.get("")
-@router.get("/")
+@router.get("", dependencies=[Depends(affiliate_gate)])
+@router.get("/", dependencies=[Depends(affiliate_gate)])
 async def get_affiliate(db: Session = Depends(get_db), current: User = Depends(get_current_student)):
     # Lazily assign a referral code to legacy accounts that don't have one.
     if not current.referral_code:
@@ -103,7 +105,9 @@ async def get_affiliate(db: Session = Depends(get_db), current: User = Depends(g
         # Amounts are integers in the currency's minor unit; divide by unit_divisor to display.
         "currency": AFFILIATE_CURRENCY,
         "unit_divisor": UNIT_DIVISOR,
-        "commission_rate": COMMISSION_RATE,
+        # This account's current rate (per-account override or the default), as a fraction.
+        "commission_rate": rate_pct_at(db, current.user_id) / 100.0,
+        "rate_pct": rate_pct_at(db, current.user_id),
     }
 
 
@@ -120,7 +124,7 @@ async def track_click(payload: TrackClick, db: Session = Depends(get_db)):
         code = (payload.ref or "").strip()
         if code:
             owner = db.query(User).filter(User.referral_code == code).first()
-            if owner:
+            if owner and referral_allowed(db, owner.user_id):
                 owner.referral_clicks = (owner.referral_clicks or 0) + 1
                 db.commit()
         # Uniform response regardless of validity (no enumeration oracle).
@@ -156,7 +160,7 @@ async def claim_ref(payload: TrackClick, db: Session = Depends(get_db),
         if not created or (_now() - created).total_seconds() > CLAIM_WINDOW_MIN * 60:
             return {"ok": True}
         owner = db.query(User).filter(User.referral_code == code).first()
-        if owner and owner.user_id != current.user_id:
+        if owner and owner.user_id != current.user_id and referral_allowed(db, owner.user_id):
             current.referred_by = owner.user_id
             db.commit()
         return {"ok": True}
@@ -248,7 +252,7 @@ class PaymentInfo(BaseModel):
     account_holder: Optional[str] = None
 
 
-@router.put("/payment")
+@router.put("/payment", dependencies=[Depends(affiliate_gate)])
 async def set_payment(
     payload: PaymentInfo,
     db: Session = Depends(get_db),
@@ -269,7 +273,7 @@ async def set_payment(
     return {"ok": True, "is_set": _has_payout(current)}
 
 
-@router.post("/payment/qr")
+@router.post("/payment/qr", dependencies=[Depends(affiliate_gate)])
 async def upload_payout_qr(
     image: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -304,7 +308,7 @@ class WithdrawRequest(BaseModel):
     amount: Optional[int] = None  # wallet minor units; default = full balance
 
 
-@router.post("/withdraw")
+@router.post("/withdraw", dependencies=[Depends(affiliate_gate)])
 async def request_withdraw(
     payload: WithdrawRequest,
     background_tasks: BackgroundTasks,

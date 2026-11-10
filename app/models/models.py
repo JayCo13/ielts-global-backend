@@ -1189,7 +1189,8 @@ class AffiliateWalletTx(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.user_id'), nullable=False, index=True)  # the affiliate
-    type = Column(Enum('commission', 'withdraw', 'withdraw_refund', name='affiliate_tx_types'), nullable=False)
+    # 'creator_reward' (2026-11): Creator Program payouts share this wallet (Creator Hub).
+    type = Column(Enum('commission', 'withdraw', 'withdraw_refund', 'creator_reward', name='affiliate_tx_types'), nullable=False)
     amount = Column(BigInteger, nullable=False)        # signed xu (+commission, -withdraw)
     balance_after = Column(BigInteger, nullable=False)
     description = Column(String(255), nullable=True)
@@ -1422,3 +1423,187 @@ class SpeakingPronItem(Base):
     note = Column(String(500), nullable=True)
     order_index = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class AffiliateRateChange(Base):
+    """Affiliate commission-rate history (ported from VN, 2026-11). The rate of an
+    order = the latest row with effective_at <= the order's created_at, so a change
+    only affects orders created after it. user_id NULL = site-wide default;
+    user_id set = per-account rate set by an admin; rate_pct NULL on a per-account
+    row = that account was reset to the default. Rows are append-only."""
+    __tablename__ = 'affiliate_rate_changes'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=True, index=True)
+    rate_pct = Column(Float, nullable=True)            # 5.0 = 5%
+    effective_at = Column(DateTime, nullable=False, index=True)
+    changed_by = Column(Integer, nullable=True)         # admin user_id
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class CreatorApplication(Base):
+    """"Work With Us" (UGC creator program) sign-up, submitted from /work-with-us.
+    Public form: user_id is filled only when the visitor was logged in."""
+    __tablename__ = 'creator_applications'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='SET NULL'), nullable=True, index=True)
+    full_name = Column(String(120), nullable=False)
+    country_code = Column(String(8), nullable=True)      # ISO-3166 alpha-2, or 'OTHER'
+    languages = Column(String(255), nullable=True)       # comma-separated
+    phone = Column(String(40), nullable=True)
+    email = Column(String(255), nullable=True)
+    status = Column(String(20), nullable=False, default='new', index=True)  # new / contacted / approved / rejected
+    admin_note = Column(Text, nullable=True)
+    ip_address = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None), index=True)
+    updated_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+    # Creator Hub (2026-11): review outcome. 'new'/'contacted' = Pending Approval.
+    reject_reason = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)          # admin user_id
+    source = Column(String(20), nullable=True)            # 'landing' (/work-with-us) | 'hub' (Profile → Creator Hub)
+    country_other = Column(String(100), nullable=True)    # country picked/typed when country_code = 'OTHER'
+
+
+class CreatorShowcaseVideo(Base):
+    """A creator video card on /work-with-us. Clicking the card opens video_url.
+    thumbnail_url is fetched automatically when possible (YouTube / TikTok) or
+    uploaded by the admin. Counts and amount are entered by the admin."""
+    __tablename__ = 'creator_showcase_videos'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    video_url = Column(String(500), nullable=False)
+    platform = Column(String(20), nullable=True)         # tiktok / youtube / instagram / facebook / other
+    thumbnail_url = Column(String(500), nullable=True)
+    handle = Column(String(100), nullable=True)          # @account
+    likes = Column(String(20), nullable=True)            # display text, e.g. "10K"
+    views = Column(String(20), nullable=True)            # display text, e.g. "2M"
+    earned = Column(String(20), nullable=True)           # display text, e.g. "$144"
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class CreatorTestimonial(Base):
+    """A creator profile card ("They started with zero experience") on /work-with-us."""
+    __tablename__ = 'creator_testimonials'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    avatar_url = Column(String(500), nullable=True)
+    subtitle = Column(String(200), nullable=True)        # e.g. "18 y/o, student, Almaty (Kazakhstan)"
+    earned = Column(String(20), nullable=True)           # e.g. "$1,200"
+    note = Column(String(255), nullable=True)            # short italic line
+    profile_url = Column(String(500), nullable=True)     # optional link to the creator's channel
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+# ── Creator Hub (2026-11) ─────────────────────────────────────────────────────
+# Three independent states (spec §3.1): CreatorApplication.status, CreatorProfile.hub_access,
+# CreatorChannel.status. Creator rewards are credited to the shared affiliate wallet
+# (AffiliateWalletTx type 'creator_reward'); nothing here is ever deleted on Disable.
+
+class CreatorProfile(Base):
+    """One row per account that has (or had) Creator Hub access. hub_access gates
+    both Creator Program and Affiliate Program in the student app."""
+    __tablename__ = 'creator_profiles'
+
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), primary_key=True)
+    hub_access = Column(Boolean, nullable=False, default=False, index=True)
+    access_source = Column(String(20), nullable=True)     # 'application' | 'admin_direct' | 'grandfathered'
+    full_name = Column(String(120), nullable=True)
+    phone = Column(String(40), nullable=True)
+    email = Column(String(255), nullable=True)
+    country_code = Column(String(8), nullable=True)
+    enabled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+    user = relationship("User", foreign_keys=[user_id])
+
+
+class CreatorAccessLog(Base):
+    """History of Creator Hub Access grants / revocations."""
+    __tablename__ = 'creator_access_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    action = Column(String(20), nullable=False)           # 'enable' | 'disable'
+    source = Column(String(20), nullable=True)            # 'application' | 'admin_direct' | 'grandfathered'
+    note = Column(Text, nullable=True)
+    actor_id = Column(Integer, nullable=True)             # admin user_id
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class CreatorChannel(Base):
+    """A social channel registered by a creator. Only 'approved' channels may submit
+    views. approved_total_views = cumulative total confirmed by the last approved
+    reconciliation (the baseline for the next period)."""
+    __tablename__ = 'creator_channels'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    platform = Column(String(20), nullable=False)         # youtube / tiktok / instagram / facebook / x / threads
+    channel_name = Column(String(255), nullable=False)
+    channel_url = Column(String(500), nullable=False)
+    url_key = Column(String(500), nullable=True, index=True)   # normalised URL for duplicate checks
+    status = Column(String(20), nullable=False, default='pending', index=True)  # pending / approved / rejected / suspended
+    status_reason = Column(Text, nullable=True)
+    is_primary = Column(Boolean, nullable=False, default=False)  # creator's current choice
+    approved_total_views = Column(BigInteger, nullable=False, default=0)
+    last_submitted_total = Column(BigInteger, nullable=True)
+    last_submitted_at = Column(DateTime, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+    updated_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class CreatorChannelLog(Base):
+    """Status history of a channel (approve / reject / suspend / reactivate)."""
+    __tablename__ = 'creator_channel_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    channel_id = Column(Integer, ForeignKey('creator_channels.id', ondelete='CASCADE'), nullable=False, index=True)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=False)
+    reason = Column(Text, nullable=True)
+    actor_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+
+
+class CreatorReconciliation(Base):
+    """One views submission ("kỳ đối soát") by a creator covering 1+ approved channels.
+    Status: submitted -> under_review -> approved | rejected. Approval credits the
+    wallet exactly once (conditional status update + wallet_tx_id)."""
+    __tablename__ = 'creator_reconciliations'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default='submitted', index=True)
+    estimated_usd = Column(Float, nullable=False, default=0)
+    approved_units = Column(BigInteger, nullable=True)    # wallet minor units credited
+    reject_reason = Column(Text, nullable=True)
+    wallet_tx_id = Column(Integer, nullable=True)
+    submitted_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None), index=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    reviewed_by = Column(Integer, nullable=True)
+
+
+class CreatorReconciliationItem(Base):
+    """Per-channel line of a reconciliation. Snapshot values — never recomputed."""
+    __tablename__ = 'creator_reconciliation_items'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    reconciliation_id = Column(Integer, ForeignKey('creator_reconciliations.id', ondelete='CASCADE'), nullable=False, index=True)
+    channel_id = Column(Integer, ForeignKey('creator_channels.id', ondelete='CASCADE'), nullable=False, index=True)
+    channel_type = Column(String(10), nullable=False)     # 'primary' | 'secondary'
+    previous_total = Column(BigInteger, nullable=False, default=0)
+    submitted_total = Column(BigInteger, nullable=False, default=0)
+    period_views = Column(BigInteger, nullable=False, default=0)
+    views_date = Column(Date, nullable=True)              # "as of" date entered by the creator
+    rate_per_k = Column(Float, nullable=False, default=0) # USD per 1,000 views
+    estimated_usd = Column(Float, nullable=False, default=0)

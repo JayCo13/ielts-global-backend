@@ -1,6 +1,6 @@
 """Affiliate / referral helpers (ported from the Vietnam tree).
 
-Commission = 10% of the amount actually paid for a VIP PackageTransaction, credited
+Commission = rate% (default 5%, per-account override; see rate_pct_at) of the amount actually paid for a VIP PackageTransaction, credited
 to the referrer's wallet PERMANENTLY (every purchase by a referred user). Credit is
 idempotent via the unique AffiliateWalletTx.source_transaction_id.
 
@@ -20,8 +20,9 @@ import os
 import random
 import string
 
-from app.models.models import User, AffiliateWalletTx, PackageTransaction
+from app.models.models import User, AffiliateWalletTx, PackageTransaction, AffiliateRateChange
 from app.utils.currency import vnd_to_usd
+from app.utils.datetime_utils import get_vietnam_time
 
 COMMISSION_RATE = float(os.getenv("AFFILIATE_COMMISSION_RATE", "0.20"))
 AFFILIATE_CURRENCY = (os.getenv("AFFILIATE_CURRENCY", "VND") or "VND").upper()
@@ -30,6 +31,64 @@ UNIT_DIVISOR = 100 if AFFILIATE_CURRENCY == "USD" else 1
 _DEFAULT_MIN = "1000" if AFFILIATE_CURRENCY == "USD" else "300000"   # 10.00 USD / 300,000 VND
 WITHDRAW_MIN_XU = int(os.getenv("AFFILIATE_WITHDRAW_MIN", _DEFAULT_MIN))
 _ALPHABET = string.ascii_uppercase + string.digits
+
+# Per-account rates (2026-11, ported from VN): the rate is versioned in
+# AffiliateRateChange and looked up at the order's created_at. COMMISSION_RATE above
+# is only the fallback while that table has no default row.
+DEFAULT_RATE_PCT = COMMISSION_RATE * 100.0
+
+
+def _now():
+    return get_vietnam_time().replace(tzinfo=None)
+
+
+_rates_table_ok = None
+
+
+def _rates_table_exists(db) -> bool:
+    """True once affiliate_rate_changes exists (checked without touching the
+    session's transaction, so a missing table never rolls back pending credits)."""
+    global _rates_table_ok
+    if _rates_table_ok:
+        return True
+    try:
+        from sqlalchemy import inspect
+        _rates_table_ok = inspect(db.get_bind()).has_table('affiliate_rate_changes')
+    except Exception:
+        _rates_table_ok = False
+    return _rates_table_ok
+
+
+def default_rate_at(db, at=None) -> float:
+    at = at or _now()
+    if not _rates_table_exists(db):   # migration not applied yet
+        return DEFAULT_RATE_PCT
+    row = (db.query(AffiliateRateChange)
+           .filter(AffiliateRateChange.user_id.is_(None), AffiliateRateChange.effective_at <= at,
+                   AffiliateRateChange.rate_pct.isnot(None))
+           .order_by(AffiliateRateChange.effective_at.desc(), AffiliateRateChange.id.desc()).first())
+    return float(row.rate_pct) if row else DEFAULT_RATE_PCT
+
+
+def custom_rate_at(db, user_id, at=None):
+    """Admin-set rate for this account at `at` (None = follows the default)."""
+    at = at or _now()
+    if not _rates_table_exists(db):
+        return None
+    row = (db.query(AffiliateRateChange)
+           .filter(AffiliateRateChange.user_id == user_id, AffiliateRateChange.effective_at <= at)
+           .order_by(AffiliateRateChange.effective_at.desc(), AffiliateRateChange.id.desc()).first())
+    return float(row.rate_pct) if row and row.rate_pct is not None else None
+
+
+def rate_pct_at(db, user_id, at=None) -> float:
+    """Commission rate (%) of affiliate `user_id` for an order created at `at`."""
+    custom = custom_rate_at(db, user_id, at)
+    return custom if custom is not None else default_rate_at(db, at)
+
+
+def fmt_pct(pct: float) -> str:
+    return f"{pct:g}%"
 
 
 def format_amount(units: int) -> str:
@@ -78,7 +137,7 @@ def amount_in_wallet_currency(transaction):
 
 
 def credit_referral_commission(db, transaction) -> bool:
-    """Idempotently credit the buyer's referrer 10% of transaction.amount.
+    """Idempotently credit the buyer's referrer rate% of transaction.amount.
     Does NOT commit — the caller's own db.commit() persists it. Returns True only
     when a new commission ledger row was added."""
     try:
@@ -98,7 +157,8 @@ def credit_referral_commission(db, transaction) -> bool:
         referrer = db.query(User).filter(User.user_id == buyer.referred_by).first()
         if not referrer:
             return False
-        commission = int(round(paid * UNIT_DIVISOR * COMMISSION_RATE))
+        pct = rate_pct_at(db, referrer.user_id, getattr(transaction, 'created_at', None))
+        commission = int(round(paid * UNIT_DIVISOR * pct / 100.0))
         if commission <= 0:
             return False
         referrer.affiliate_balance = (referrer.affiliate_balance or 0) + commission
@@ -107,7 +167,7 @@ def credit_referral_commission(db, transaction) -> bool:
             type='commission',
             amount=commission,
             balance_after=referrer.affiliate_balance,
-            description=f"Commission from VIP order #{transaction.transaction_id}",
+            description=f"{fmt_pct(pct)} commission from VIP order #{transaction.transaction_id}",
             source_user_id=buyer.user_id,
             source_transaction_id=transaction.transaction_id,
         ))

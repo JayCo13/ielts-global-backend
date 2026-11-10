@@ -16,10 +16,11 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.models import User, AffiliateWalletTx, AffiliateWithdrawal, PackageTransaction
+from app.models.models import User, AffiliateWalletTx, AffiliateWithdrawal, PackageTransaction, AffiliateRateChange
 from app.routes.admin.auth import get_current_admin
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.affiliate import sync_commissions, AFFILIATE_CURRENCY, UNIT_DIVISOR, WITHDRAW_MIN_XU
+from app.utils.affiliate import default_rate_at, custom_rate_at
 
 router = APIRouter()
 
@@ -284,3 +285,142 @@ async def attribute(
     return {"ok": True, "user_id": target.user_id, "referrer_id": owner.user_id,
             "referrer_name": owner.username, "backfilled_orders": int(credited or 0),
             "backfilled_xu": int(total or 0)}
+
+
+# ── Per-account commission rates (2026-11, ported from VN) ─────────────────────────
+#
+# Default 5% for everyone (seeded by migration creator_prog_2026). An admin can give a
+# single account its own rate; accounts that were never changed follow the default.
+# Every change is a NEW row in affiliate_rate_changes, effective from the moment it is
+# saved — orders created earlier keep the rate that applied when they were created.
+
+
+def _rate_row(db, u: User):
+    custom = custom_rate_at(db, u.user_id)
+    since = None
+    if custom is not None:
+        last = (db.query(AffiliateRateChange).filter(AffiliateRateChange.user_id == u.user_id)
+                .order_by(AffiliateRateChange.effective_at.desc(), AffiliateRateChange.id.desc()).first())
+        since = last.effective_at.isoformat() if last and last.effective_at else None
+    signups = db.query(func.count(User.user_id)).filter(User.referred_by == u.user_id).scalar() or 0
+    return {
+        "user_id": u.user_id, "username": u.username, "email": u.email,
+        "referral_code": u.referral_code, "signups": int(signups),
+        "custom_pct": custom, "since": since,
+    }
+
+
+@router.get("/affiliate/rates")
+async def list_rates(
+    q: Optional[str] = Query(None, description="search accounts by username / email / referral code"),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """Default rate + accounts that currently have their own rate; with `q`, also search results."""
+    uids = [r[0] for r in db.query(AffiliateRateChange.user_id)
+            .filter(AffiliateRateChange.user_id.isnot(None)).distinct().all()]
+    custom = []
+    if uids:
+        for u in db.query(User).filter(User.user_id.in_(uids)).all():
+            row = _rate_row(db, u)
+            if row["custom_pct"] is not None:
+                custom.append(row)
+        custom.sort(key=lambda r: r["since"] or "", reverse=True)
+    results = []
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        users = (db.query(User)
+                 .filter(or_(User.username.ilike(like), User.email.ilike(like),
+                             User.referral_code == q.strip()))
+                 .order_by(User.user_id.desc()).limit(30).all())
+        results = [_rate_row(db, u) for u in users]
+    return {"default_pct": default_rate_at(db), "custom": custom, "results": results}
+
+
+class RateIn(BaseModel):
+    user_id: int
+    # None = back to the default rate
+    rate_pct: Optional[float] = None
+
+
+@router.post("/affiliate/rates")
+async def set_rate(
+    payload: RateIn,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    u = db.query(User).filter(User.user_id == payload.user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    pct = payload.rate_pct
+    if pct is not None:
+        pct = round(float(pct), 1)
+        if not (0 <= pct <= 100):
+            raise HTTPException(status_code=400, detail="Rate must be between 0% and 100%.")
+    if pct == custom_rate_at(db, u.user_id):
+        return {"ok": True, "unchanged": True, **_rate_row(db, u)}
+    db.add(AffiliateRateChange(user_id=u.user_id, rate_pct=pct, effective_at=_now(),
+                               changed_by=current_admin.user_id))
+    db.commit()
+    return {"ok": True, **_rate_row(db, u)}
+
+
+class DefaultRateIn(BaseModel):
+    rate_pct: float
+
+
+@router.post("/affiliate/rates/default")
+async def set_default_rate(
+    payload: DefaultRateIn,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """Change the site-wide default for orders created from now on."""
+    pct = round(float(payload.rate_pct), 1)
+    if not (0 <= pct <= 100):
+        raise HTTPException(status_code=400, detail="Rate must be between 0% and 100%.")
+    if pct != default_rate_at(db):
+        db.add(AffiliateRateChange(user_id=None, rate_pct=pct, effective_at=_now(),
+                                   changed_by=current_admin.user_id))
+        db.commit()
+    return {"ok": True, "default_pct": default_rate_at(db)}
+
+
+# ── Leaderboard (2026-11): who drives clicks, signups, VIP buyers, commission ──
+
+@router.get("/affiliate/leaderboard")
+async def leaderboard(
+    sort: str = Query("commission"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """Top referrers to judge creator effectiveness. sort = clicks | signups | vip | commission."""
+    signups = dict(db.query(User.referred_by, func.count(User.user_id))
+                   .filter(User.referred_by.isnot(None)).group_by(User.referred_by).all())
+    vip = dict(db.query(AffiliateWalletTx.user_id, func.count(func.distinct(AffiliateWalletTx.source_user_id)))
+               .filter(AffiliateWalletTx.type == "commission", AffiliateWalletTx.source_user_id.isnot(None))
+               .group_by(AffiliateWalletTx.user_id).all())
+    commission = dict(db.query(AffiliateWalletTx.user_id, func.coalesce(func.sum(AffiliateWalletTx.amount), 0))
+                      .filter(AffiliateWalletTx.type == "commission").group_by(AffiliateWalletTx.user_id).all())
+    clicks = dict(db.query(User.user_id, User.referral_clicks)
+                  .filter(User.referral_clicks.isnot(None), User.referral_clicks > 0).all())
+    ids = set(signups) | set(vip) | set(commission) | set(clicks)
+    if not ids:
+        return {"items": [], "currency": AFFILIATE_CURRENCY, "unit_divisor": UNIT_DIVISOR}
+    rows = []
+    for uid in ids:
+        s, v = int(signups.get(uid, 0) or 0), int(vip.get(uid, 0) or 0)
+        rows.append({"user_id": uid, "clicks": int(clicks.get(uid, 0) or 0), "signups": s, "vip_buyers": v,
+                     "commission": int(commission.get(uid, 0) or 0),
+                     "conversion_pct": round(v * 100.0 / s, 1) if s else 0.0})
+    key = {"clicks": "clicks", "signups": "signups", "vip": "vip_buyers"}.get(sort, "commission")
+    rows.sort(key=lambda r: (r[key], r["commission"], r["signups"]), reverse=True)
+    rows = rows[:limit]
+    users = {u.user_id: u for u in db.query(User).filter(User.user_id.in_([r["user_id"] for r in rows])).all()}
+    for r in rows:
+        u = users.get(r["user_id"])
+        r["username"] = u.username if u else None
+        r["email"] = u.email if u else None
+        r["balance"] = int(u.affiliate_balance or 0) if u else 0
+    return {"items": rows, "currency": AFFILIATE_CURRENCY, "unit_divisor": UNIT_DIVISOR}

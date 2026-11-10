@@ -965,6 +965,11 @@ async def get_listening_forecasts(
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
+    # Batched + Redis-cached builder (same response). Set FORECAST_LIST_LEGACY=1
+    # to fall back to the original per-exam loop below.
+    if os.getenv('FORECAST_LIST_LEGACY') != '1':
+        from app.utils.forecast_list import build_forecast_list
+        return await build_forecast_list(db, current_student, 'listening')
     exams = db.query(Exam).join(ExamSection).filter(
         Exam.is_active == True,
         ExamSection.section_type == 'listening'

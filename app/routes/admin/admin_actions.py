@@ -1972,6 +1972,15 @@ async def get_admin_notifications(
             "status": transaction.status,
             "is_read": f"transaction_{transaction.transaction_id}" in read_notification_ids
         })
+
+    # Creator Hub (2026-11): new applications / channels / views submissions waiting for review.
+    # Isolated so a problem here can never break the payment notifications above.
+    try:
+        from app.utils.creator_hub_notify import creator_notifications
+        notifications.extend(creator_notifications(db, days, read_notification_ids))
+    except Exception:
+        db.rollback()
+
     # Sort all notifications by timestamp (newest first)
     notifications.sort(key=lambda x: x["timestamp"], reverse=True)
     

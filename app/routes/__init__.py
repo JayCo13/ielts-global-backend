@@ -47,6 +47,10 @@ from .student.audio_cues_routes import router as audio_cues_router
 from .admin.email_broadcast import router as email_broadcast_router
 from .customer.affiliate import router as affiliate_router
 from .admin.affiliate_admin import router as affiliate_admin_router
+from .customer.creator_program import router as creator_program_router
+from .admin.creator_program_admin import router as creator_program_admin_router
+from .customer.creator_hub import router as creator_hub_router
+from .admin.creator_hub_admin import router as creator_hub_admin_router
 
 router = APIRouter()
 
@@ -123,3 +127,9 @@ router.include_router(email_broadcast_router, prefix="/admin", tags=["admin-emai
 # Affiliate program (ported from VN): customer wallet/referrals + admin payouts.
 router.include_router(affiliate_router, prefix="/customer/affiliate", tags=["affiliate"])
 router.include_router(affiliate_admin_router, prefix="/admin", tags=["admin-affiliate"])
+# "Work With Us" UGC creator program: public page data + sign-up (/creator-program*)
+# and admin management (/admin/creator-program/*).
+router.include_router(creator_program_router, tags=["creator-program"])
+router.include_router(creator_program_admin_router, prefix="/admin", tags=["admin-creator-program"])
+router.include_router(creator_hub_router, tags=["creator-hub"])
+router.include_router(creator_hub_admin_router, prefix="/admin", tags=["admin-creator-hub"])
