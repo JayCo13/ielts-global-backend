@@ -10,7 +10,7 @@ referrer always pays the past orders too.
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -20,13 +20,24 @@ from app.models.models import User, AffiliateWalletTx, AffiliateWithdrawal, Pack
 from app.routes.admin.auth import get_current_admin
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.affiliate import sync_commissions, AFFILIATE_CURRENCY, UNIT_DIVISOR, WITHDRAW_MIN_XU
-from app.utils.affiliate import default_rate_at, custom_rate_at
+from app.utils.affiliate import default_rate_at, custom_rate_at, format_amount
+from app.utils import creator_hub_email as hub_mail
 
 router = APIRouter()
 
 
 def _now():
     return get_vietnam_time().replace(tzinfo=None)
+
+
+def _payee(db, user_id):
+    """(email, display name) of the affiliate/creator for withdrawal emails."""
+    from app.utils.creator_hub import get_profile
+    u = db.query(User).filter(User.user_id == user_id).first()
+    if not u:
+        return None, None
+    p = get_profile(db, user_id)
+    return (u.email or (p.email if p else None)), ((p.full_name if p else None) or u.username)
 
 
 def _days_waiting(w: AffiliateWithdrawal) -> int:
@@ -141,6 +152,7 @@ async def withdrawal_detail(
 @router.post("/affiliate/withdrawals/{withdrawal_id}/paid")
 async def mark_paid(
     withdrawal_id: int,
+    bg: BackgroundTasks,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_admin),
 ):
@@ -152,6 +164,10 @@ async def mark_paid(
     w.status = "paid"
     w.processed_at = _now()
     db.commit()
+    # Feedback 2026-11-10: tell the creator their money is on the way (after commit; never blocks).
+    to, name = _payee(db, w.user_id)
+    paid_to = " · ".join(x for x in (w.bank or "PayPal", w.account_number) if x)
+    bg.add_task(hub_mail.withdrawal_paid, to, name, w.withdrawal_id, format_amount(int(w.amount)), paid_to)
     return {"ok": True, "status": w.status}
 
 
@@ -162,6 +178,7 @@ class RejectRequest(BaseModel):
 @router.post("/affiliate/withdrawals/{withdrawal_id}/reject")
 async def reject(
     withdrawal_id: int,
+    bg: BackgroundTasks,
     payload: Optional[RejectRequest] = None,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_admin),
@@ -191,6 +208,8 @@ async def reject(
     w.admin_note = reason
     w.processed_at = _now()
     db.commit()
+    to, name = _payee(db, w.user_id)
+    bg.add_task(hub_mail.withdrawal_rejected, to, name, w.withdrawal_id, format_amount(int(w.amount)), reason)
     return {"ok": True, "status": w.status}
 
 

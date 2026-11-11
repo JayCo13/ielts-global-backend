@@ -1607,3 +1607,6 @@ class CreatorReconciliationItem(Base):
     views_date = Column(Date, nullable=True)              # "as of" date entered by the creator
     rate_per_k = Column(Float, nullable=False, default=0) # USD per 1,000 views
     estimated_usd = Column(Float, nullable=False, default=0)
+    # 2026-11 feedback: optional proof (screenshots / screen recordings of total views),
+    # JSON list of public R2 URLs uploaded via POST /creator-hub/proofs.
+    proof_urls = Column(Text, nullable=True)

@@ -126,3 +126,23 @@ def reconciliation_rejected(to, name, rid, reason):
         _reason_block(reason),
         "No reward was added for this submission. You can submit again with corrected numbers.",
     ], "Submit again"))
+
+
+# ── Wallet withdrawals (feedback 2026-11-10: email the creator once the admin has paid) ──
+
+def withdrawal_paid(to, name, wid, amount_text, paid_to=None):
+    paras = [f"Your withdrawal request <b>#{_e(wid)}</b> has been paid.",
+             f"Amount: <b>{_e(amount_text)}</b>"
+             + (f"<br>Sent to: <b>{_e(paid_to)}</b>" if paid_to else "")]
+    paras.append("Depending on your payment provider, it may take a little while to show up in your account. "
+                 "If you don't see it within 3 business days, just reply to this email.")
+    _send(to, f"Your withdrawal has been paid · {SITE_NAME}", _layout(name, "Withdrawal paid 💸", paras, "View wallet"))
+
+
+def withdrawal_rejected(to, name, wid, amount_text, reason):
+    _send(to, f"Withdrawal request #{wid} not processed · {SITE_NAME}", _layout(name, "Withdrawal request not processed", [
+        f"We couldn't process your withdrawal request <b>#{_e(wid)}</b>.",
+        _reason_block(reason),
+        f"<b>{_e(amount_text)}</b> has been returned to your wallet. Please check your payout details "
+        "and send a new request.",
+    ], "View wallet"))

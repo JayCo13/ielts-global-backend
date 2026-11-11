@@ -28,6 +28,9 @@ PLATFORMS = {
     "youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram",
     "facebook": "Facebook", "x": "X (Twitter)", "threads": "Threads",
 }
+# Two views submissions must be at least this many days apart (anti-spam, feedback 2026-11-10).
+# Rejected submissions don't count, so a creator can correct and resubmit straight away.
+SUBMIT_MIN_DAYS = int(os.getenv("CREATOR_SUBMIT_MIN_DAYS", "20"))
 CHANNEL_STATUSES = ("pending", "approved", "rejected", "suspended")
 PENDING_APP_STATUSES = ("new", "contacted")      # shown as "Pending Approval"
 OPEN_RECON_STATUSES = ("submitted", "under_review")
@@ -138,3 +141,21 @@ def detect_platform(url: str) -> Optional[str]:
     if re.search(r"(^|//|\.)(x|twitter)\.com", u):
         return "x"
     return None
+
+
+def last_counted_submission(db, user_id: int):
+    """Latest non-rejected views submission of `user_id` (None if there is none)."""
+    from app.models.models import CreatorReconciliation
+    return (db.query(CreatorReconciliation)
+            .filter(CreatorReconciliation.user_id == user_id, CreatorReconciliation.status != "rejected")
+            .order_by(CreatorReconciliation.submitted_at.desc(), CreatorReconciliation.id.desc()).first())
+
+
+def next_submit_at(db, user_id: int):
+    """Earliest time the creator may submit views again, or None when allowed now."""
+    from datetime import timedelta
+    last = last_counted_submission(db, user_id)
+    if not last or not last.submitted_at or SUBMIT_MIN_DAYS <= 0:
+        return None
+    nxt = last.submitted_at + timedelta(days=SUBMIT_MIN_DAYS)
+    return nxt if nxt > now() else None

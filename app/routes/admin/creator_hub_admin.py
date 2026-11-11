@@ -6,6 +6,7 @@ Creators       GET creators (overview), GET creators/{user_id} (profile detail)
 Channels       GET channels, POST channels/{id}/status, GET channels/{id}/logs
 Reconciliation GET reconciliations, POST reconciliations/{id}/review | approve | reject
 Earnings       GET earnings, GET earnings/transactions
+Leaderboard    GET leaderboard (lifetime | monthly)
 
 Admin-facing messages are Vietnamese (admin UI convention).
 """
@@ -28,6 +29,8 @@ from app.utils.creator_hub import (
     PLATFORMS, CHANNEL_STATUSES, OPEN_RECON_STATUSES, PENDING_APP_STATUSES,
     now, app_status_label, get_profile, set_hub_access, usd_to_units,
 )
+from app.utils.creator_leaderboard import build_leaderboard, available_months
+from app.routes.customer.creator_hub import proof_list
 
 router = APIRouter(prefix="/creator-hub")
 
@@ -272,12 +275,26 @@ def _recon_rows(db, rs):
     chans = {c.id: c for c in db.query(CreatorChannel).filter(CreatorChannel.id.in_(ch_ids)).all()} if ch_ids else {}
     uids = {r.user_id for r in rs}
     users = {u.user_id: u for u in db.query(User).filter(User.user_id.in_(uids)).all()} if uids else {}
+    # Feedback 2026-11-10: show the creator's previous submission time and the gap in days.
+    prev_at = {}
+    for r in rs:
+        if not r.submitted_at:
+            continue
+        prev = (db.query(CreatorReconciliation.submitted_at)
+                .filter(CreatorReconciliation.user_id == r.user_id, CreatorReconciliation.id != r.id,
+                        CreatorReconciliation.submitted_at < r.submitted_at)
+                .order_by(CreatorReconciliation.submitted_at.desc()).first())
+        prev_at[r.id] = prev[0] if prev else None
     out = []
     for r in rs:
         u = users.get(r.user_id)
+        p_at = prev_at.get(r.id)
         out.append({
             "id": r.id, "user_id": r.user_id, "username": u.username if u else None,
             "status": r.status, "estimated_usd": r.estimated_usd,
+            "previous_submitted_at": _iso(p_at),
+            "days_since_previous": ((r.submitted_at - p_at).total_seconds() / 86400.0
+                                    if p_at and r.submitted_at else None),
             "approved_units": int(r.approved_units) if r.approved_units is not None else None,
             "reject_reason": r.reject_reason, "submitted_at": _iso(r.submitted_at), "reviewed_at": _iso(r.reviewed_at),
             "wallet_tx_id": r.wallet_tx_id,
@@ -290,6 +307,7 @@ def _recon_rows(db, rs):
                 "channel_type": it.channel_type, "previous_total": int(it.previous_total),
                 "submitted_total": int(it.submitted_total), "period_views": int(it.period_views),
                 "views_date": _iso(it.views_date), "rate_per_k": it.rate_per_k, "estimated_usd": it.estimated_usd,
+                "proof_urls": proof_list(it.proof_urls),
             } for it in items.get(r.id, [])],
         })
     return out
@@ -553,3 +571,19 @@ async def earning_transactions(user_id: Optional[int] = Query(None), db: Session
         query = query.filter(CreatorReconciliation.user_id == user_id)
     rs = query.order_by(CreatorReconciliation.reviewed_at.desc()).limit(200).all()
     return {"items": _recon_rows(db, rs), **_money_meta()}
+
+
+# ── Leaderboard (feedback 2026-11-10) ────────────────────────────────────────
+
+@router.get("/leaderboard")
+async def leaderboard(period: str = Query("lifetime", pattern="^(lifetime|monthly)$"),
+                      month: Optional[str] = Query(None, max_length=7),
+                      db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
+    data = build_leaderboard(db, period, month)
+    users = {u.user_id: u for u in db.query(User).filter(
+        User.user_id.in_([r["user_id"] for r in data["items"]])).all()} if data["items"] else {}
+    for r in data["items"]:
+        u = users.get(r["user_id"])
+        r["username"], r["email"] = (u.username, u.email) if u else (None, None)
+    data["months"] = available_months(db)
+    return data
