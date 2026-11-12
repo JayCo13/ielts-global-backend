@@ -1546,7 +1546,8 @@ class CreatorChannel(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
-    platform = Column(String(20), nullable=False)         # youtube / tiktok / instagram / facebook / x / threads
+    platform = Column(String(20), nullable=False)         # youtube / tiktok / instagram / facebook / x / threads / other
+    platform_name = Column(String(100), nullable=True)    # creator-typed platform name when platform == 'other'
     channel_name = Column(String(255), nullable=False)
     channel_url = Column(String(500), nullable=False)
     url_key = Column(String(500), nullable=True, index=True)   # normalised URL for duplicate checks
@@ -1554,6 +1555,7 @@ class CreatorChannel(Base):
     status_reason = Column(Text, nullable=True)
     is_primary = Column(Boolean, nullable=False, default=False)  # creator's current choice
     approved_total_views = Column(BigInteger, nullable=False, default=0)
+    initial_views = Column(BigInteger, nullable=False, default=0, server_default='0')  # declared at registration = first baseline
     last_submitted_total = Column(BigInteger, nullable=True)
     last_submitted_at = Column(DateTime, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)

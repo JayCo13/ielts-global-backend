@@ -27,7 +27,7 @@ from app.utils.affiliate import AFFILIATE_CURRENCY, UNIT_DIVISOR, format_amount
 from app.utils import creator_hub_email as hub_mail
 from app.utils.creator_hub import (
     PLATFORMS, CHANNEL_STATUSES, OPEN_RECON_STATUSES, PENDING_APP_STATUSES,
-    now, app_status_label, get_profile, set_hub_access, usd_to_units,
+    now, app_status_label, get_profile, set_hub_access, usd_to_units, platform_label,
 )
 from app.utils.creator_leaderboard import build_leaderboard, available_months
 from app.routes.customer.creator_hub import proof_list
@@ -256,7 +256,8 @@ def _channel_row(c: CreatorChannel, user: Optional[User] = None, profile: Option
     return {
         "id": c.id, "user_id": c.user_id, "username": user.username if user else None,
         "full_name": profile.full_name if profile else None,
-        "platform": c.platform, "platform_label": PLATFORMS.get(c.platform, c.platform),
+        "platform": c.platform, "platform_label": platform_label(c), "platform_name": c.platform_name,
+        "initial_views": int(c.initial_views or 0),
         "channel_name": c.channel_name, "channel_url": c.channel_url, "status": c.status,
         "status_reason": c.status_reason, "is_primary": bool(c.is_primary),
         "approved_total_views": int(c.approved_total_views or 0),
@@ -303,7 +304,7 @@ def _recon_rows(db, rs):
                 "channel_name": chans[it.channel_id].channel_name if it.channel_id in chans else "",
                 "channel_url": chans[it.channel_id].channel_url if it.channel_id in chans else "",
                 "channel_status": chans[it.channel_id].status if it.channel_id in chans else "",
-                "platform": PLATFORMS.get(chans[it.channel_id].platform, "") if it.channel_id in chans else "",
+                "platform": platform_label(chans[it.channel_id]) if it.channel_id in chans else "",
                 "channel_type": it.channel_type, "previous_total": int(it.previous_total),
                 "submitted_total": int(it.submitted_total), "period_views": int(it.period_views),
                 "views_date": _iso(it.views_date), "rate_per_k": it.rate_per_k, "estimated_usd": it.estimated_usd,
@@ -415,7 +416,7 @@ async def channel_action(channel_id: int, payload: ChannelActionIn, bg: Backgrou
     db.commit()
     mail_to, name = _contact(db, db.query(User).filter(User.user_id == c.user_id).first())
     kind = "reactivated" if payload.action == "reactivate" else c.status
-    bg.add_task(hub_mail.channel_status, mail_to, name, c.platform, c.channel_name, kind, reason)
+    bg.add_task(hub_mail.channel_status, mail_to, name, platform_label(c), c.channel_name, kind, reason)
     return {"ok": True, "status": c.status}
 
 

@@ -20,10 +20,10 @@ from typing import Optional, Tuple
 from sqlalchemy import func
 
 from app.models.models import (
-    User, CreatorProfile, CreatorReconciliation, CreatorReconciliationItem, AffiliateWalletTx,
+    User, CreatorProfile, CreatorReconciliation, CreatorReconciliationItem, AffiliateWalletTx, CreatorChannel,
 )
 from app.utils.affiliate import AFFILIATE_CURRENCY, UNIT_DIVISOR
-from app.utils.creator_hub import now
+from app.utils.creator_hub import now, platform_label
 
 
 def month_bounds(month: Optional[str]) -> Tuple[datetime, datetime, str]:
@@ -100,6 +100,15 @@ def build_leaderboard(db, period: str = "lifetime", month: Optional[str] = None)
                    .filter(User.referred_by.in_(ids), *win(User.created_at))
                    .group_by(User.referred_by).all())
     users = {u.user_id: u for u in db.query(User).filter(User.user_id.in_(ids)).all()}
+    # Approved channels of each creator (feedback 2026-11-11: "Channels" column, same in both tabs).
+    chans = {}
+    for c in (db.query(CreatorChannel)
+              .filter(CreatorChannel.user_id.in_(ids), CreatorChannel.status == "approved")
+              .order_by(CreatorChannel.approved_total_views.desc(), CreatorChannel.id.asc()).all()):
+        chans.setdefault(c.user_id, []).append({
+            "channel_name": c.channel_name, "platform": c.platform, "platform_label": platform_label(c),
+            "total_views": int(c.approved_total_views or 0), "channel_url": c.channel_url,
+        })
 
     rows = []
     for p in profiles:
@@ -114,6 +123,7 @@ def build_leaderboard(db, period: str = "lifetime", month: Optional[str] = None)
             "name": (p.full_name or (u.username if u else None) or f"Creator {uid}").strip(),
             "total_views": v, "views_reward": rw, "affiliate_commission": cm, "total_reward": rw + cm,
             "signups": s, "vip_buyers": b,
+            "channels": chans.get(uid, []), "channel_count": len(chans.get(uid, [])),
             "signup_rate": round(_rate(s, v), 4), "vip_rate": round(_rate(b, v), 4),
             "_sr": _rate(s, v), "_vr": _rate(b, v),
         })

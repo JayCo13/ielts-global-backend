@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.models import (
     User, CreatorApplication, CreatorChannel, CreatorReconciliation, CreatorReconciliationItem,
-    AffiliateWalletTx,
+    AffiliateWalletTx, CreatorChannelLog,
 )
 from app.routes.admin.auth import get_current_student
 from app.routes.customer.creator_program import _EMAIL_RE, _PHONE_RE
@@ -37,7 +37,7 @@ from app.utils.affiliate import AFFILIATE_CURRENCY, UNIT_DIVISOR
 from app.utils.creator_hub import (
     PLATFORMS, PRIMARY_RATE_PER_K, SECONDARY_RATE_PER_K, OPEN_RECON_STATUSES, SUBMIT_MIN_DAYS,
     now, app_status_label, get_profile, has_hub_access, latest_application, set_hub_access,
-    normalize_channel_url, detect_platform, reward_usd, next_submit_at,
+    normalize_channel_url, detect_platform, reward_usd, next_submit_at, platform_label,
 )
 from app.utils.creator_leaderboard import abbreviate_name, build_leaderboard, available_months
 
@@ -165,7 +165,8 @@ async def update_profile(payload: ProfileIn, db: Session = Depends(get_db), curr
 
 def _channel_dict(c: CreatorChannel, open_items=None):
     return {
-        "id": c.id, "platform": c.platform, "platform_label": PLATFORMS.get(c.platform, c.platform),
+        "id": c.id, "platform": c.platform, "platform_label": platform_label(c),
+        "platform_name": c.platform_name, "initial_views": int(c.initial_views or 0),
         "channel_name": c.channel_name, "channel_url": c.channel_url, "status": c.status,
         "status_reason": c.status_reason, "is_primary": bool(c.is_primary),
         "approved_total_views": int(c.approved_total_views or 0),
@@ -210,33 +211,102 @@ async def list_channels(db: Session = Depends(get_db), current: User = Depends(r
 
 class ChannelIn(BaseModel):
     platform: Optional[str] = None
+    platform_name: Optional[str] = Field(None, max_length=100)   # required when platform == 'other'
     channel_name: str = Field(..., min_length=1, max_length=255)
     channel_url: str = Field(..., min_length=4, max_length=500)
+    initial_views: Optional[int] = Field(0, ge=0, le=10**12)     # blank / missing -> 0
 
 
-@router.post("/channels")
-async def register_channel(payload: ChannelIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+def _clean_channel(db, payload: ChannelIn, user_id: int, exclude_id: Optional[int] = None):
+    """Validate a channel form; returns (url, platform, platform_name, key, initial_views)."""
     url = payload.channel_url.strip()
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
     platform = (payload.platform or "").strip().lower() or detect_platform(url)
     if platform not in PLATFORMS:
         raise HTTPException(status_code=400, detail="Please choose the platform of this channel.")
+    pname = None
+    if platform == "other":
+        pname = (payload.platform_name or "").strip()
+        if not pname:
+            raise HTTPException(status_code=400, detail="Please enter the platform name.")
     key = normalize_channel_url(url)
-    mine = (db.query(CreatorChannel)
-            .filter(CreatorChannel.user_id == current.user_id, CreatorChannel.url_key == key,
-                    CreatorChannel.status != "rejected").first())
-    if mine:
+    q = (db.query(CreatorChannel)
+         .filter(CreatorChannel.user_id == user_id, CreatorChannel.url_key == key,
+                 CreatorChannel.status != "rejected"))
+    if exclude_id:
+        q = q.filter(CreatorChannel.id != exclude_id)
+    if q.first():
         raise HTTPException(status_code=400, detail="You have already registered this channel.")
+    return url, platform, pname, key, int(payload.initial_views or 0)
+
+
+@router.post("/channels")
+async def register_channel(payload: ChannelIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+    url, platform, pname, key, initial = _clean_channel(db, payload, current.user_id)
     if db.query(func.count(CreatorChannel.id)).filter(CreatorChannel.user_id == current.user_id).scalar() >= 30:
         raise HTTPException(status_code=400, detail="Too many channels registered.")
     ts = now()
-    c = CreatorChannel(user_id=current.user_id, platform=platform, channel_name=payload.channel_name.strip(),
-                       channel_url=url, url_key=key, status="pending", created_at=ts, updated_at=ts)
+    # Initial views = the channel's starting baseline: the first period counts views above it.
+    c = CreatorChannel(user_id=current.user_id, platform=platform, platform_name=pname,
+                       channel_name=payload.channel_name.strip(), channel_url=url, url_key=key,
+                       initial_views=initial, approved_total_views=initial,
+                       status="pending", created_at=ts, updated_at=ts)
     db.add(c)
     db.commit()
     db.refresh(c)
     return _channel_dict(c)
+
+
+def _own_channel(db, channel_id: int, user_id: int) -> CreatorChannel:
+    c = (db.query(CreatorChannel)
+         .filter(CreatorChannel.id == channel_id, CreatorChannel.user_id == user_id).first())
+    if not c:
+        raise HTTPException(status_code=404, detail="Channel not found.")
+    return c
+
+
+def _has_submissions(db, channel_id: int) -> bool:
+    return db.query(CreatorReconciliationItem.id).filter(
+        CreatorReconciliationItem.channel_id == channel_id).first() is not None
+
+
+@router.put("/channels/{channel_id}/resubmit")
+async def resubmit_channel(channel_id: int, payload: ChannelIn, db: Session = Depends(get_db),
+                           current: User = Depends(require_hub)):
+    """A rejected channel can be corrected and sent for approval again."""
+    c = _own_channel(db, channel_id, current.user_id)
+    if c.status != "rejected":
+        raise HTTPException(status_code=400, detail="Only a rejected channel can be resubmitted.")
+    url, platform, pname, key, initial = _clean_channel(db, payload, current.user_id, exclude_id=c.id)
+    ts = now()
+    db.add(CreatorChannelLog(channel_id=c.id, from_status=c.status, to_status="pending",
+                             reason="Resubmitted by creator", actor_id=current.user_id, created_at=ts))
+    c.platform, c.platform_name = platform, pname
+    c.channel_name, c.channel_url, c.url_key = payload.channel_name.strip(), url, key
+    c.initial_views = initial
+    if not _has_submissions(db, c.id):
+        c.approved_total_views = initial
+    c.status, c.status_reason, c.is_primary = "pending", None, False
+    c.created_at = c.created_at or ts
+    c.updated_at = ts
+    db.commit()
+    db.refresh(c)
+    return _channel_dict(c)
+
+
+@router.delete("/channels/{channel_id}")
+async def delete_channel(channel_id: int, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+    """Remove a rejected channel from the list (channels with views submissions are kept)."""
+    c = _own_channel(db, channel_id, current.user_id)
+    if c.status != "rejected":
+        raise HTTPException(status_code=400, detail="Only a rejected channel can be deleted.")
+    if _has_submissions(db, c.id):
+        raise HTTPException(status_code=400, detail="This channel has views submissions and can't be deleted.")
+    db.query(CreatorChannelLog).filter(CreatorChannelLog.channel_id == c.id).delete(synchronize_session=False)
+    db.delete(c)
+    db.commit()
+    return {"ok": True}
 
 
 class PrimaryIn(BaseModel):

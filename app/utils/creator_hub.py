@@ -27,6 +27,7 @@ SECONDARY_RATE_PER_K = float(os.getenv("CREATOR_SECONDARY_RATE_PER_K", "0.10"))
 PLATFORMS = {
     "youtube": "YouTube", "tiktok": "TikTok", "instagram": "Instagram",
     "facebook": "Facebook", "x": "X (Twitter)", "threads": "Threads",
+    "other": "Others",   # keep last: creator types the platform name (feedback 2026-11-11)
 }
 # Two views submissions must be at least this many days apart (anti-spam, feedback 2026-11-10).
 # Rejected submissions don't count, so a creator can correct and resubmit straight away.
@@ -124,6 +125,13 @@ def normalize_channel_url(url: str) -> str:
     path = re.sub(r"^(www\.|m\.|mobile\.|vm\.)", "", path.lower()).rstrip("/")
     keep = [kv for kv in query.split("&") if kv and not _TRACKING.match(kv.split("=", 1)[0].lower())]
     return path + (("?" + "&".join(sorted(keep))) if keep else "")
+
+
+def platform_label(c) -> str:
+    """Display name of a channel's platform; 'other' shows the creator-typed name."""
+    if c.platform == "other" and (getattr(c, "platform_name", None) or "").strip():
+        return c.platform_name.strip()
+    return PLATFORMS.get(c.platform, c.platform)
 
 
 def detect_platform(url: str) -> Optional[str]:

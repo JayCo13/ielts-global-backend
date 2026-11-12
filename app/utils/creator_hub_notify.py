@@ -4,7 +4,7 @@ so /admin/notifications/mark-read handles them unchanged."""
 from datetime import timedelta
 
 from app.models.models import CreatorApplication, CreatorChannel, CreatorReconciliation, User
-from app.utils.creator_hub import PENDING_APP_STATUSES, OPEN_RECON_STATUSES, PLATFORMS
+from app.utils.creator_hub import PENDING_APP_STATUSES, OPEN_RECON_STATUSES, PLATFORMS, platform_label  # noqa: F401
 from app.utils.datetime_utils import get_vietnam_time
 
 
@@ -27,7 +27,7 @@ def creator_notifications(db, days: int, read_ids):
                  .filter(CreatorChannel.status == "pending", CreatorChannel.created_at >= since)
                  .order_by(CreatorChannel.created_at.desc()).limit(30).all()):
         add(f"creatorch_{c.id}", "New creator channel",
-            f"{u.username} registered {PLATFORMS.get(c.platform, c.platform)} channel “{c.channel_name}”", c.created_at)
+            f"{u.username} registered {platform_label(c)} channel “{c.channel_name}”", c.created_at)
 
     for r, u in (db.query(CreatorReconciliation, User).join(User, User.user_id == CreatorReconciliation.user_id)
                  .filter(CreatorReconciliation.status.in_(OPEN_RECON_STATUSES), CreatorReconciliation.submitted_at >= since)
