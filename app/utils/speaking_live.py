@@ -44,19 +44,29 @@ FALLBACK_MODEL = "gemini-flash-lite-latest"
 # gives up after 30s in total, so analysis + voice must stay well inside that.
 # 12s: shorter than this pushed most answers onto the flatter Chirp voice (2026-11-17,
 # "giọng không còn hay"). The room waits 30s in total.
-# ONE fixed voice for every Live Action feedback, whatever examiner asked the questions
-# (2026-11-17: "chọn 1 giọng duy nhất để ổn định"). A Gemini/Chirp3-HD star name; the same
-# name exists in both engines, so the Chirp fallback keeps the same speaker too.
-LIVE_VOICE = (os.getenv("SPEAKING_LIVE_VOICE") or "Puck").strip()
-# Fixed character sheet sent with every request so each clip sounds like the same person.
+# TWO fixed feedback voices, picked by the gender of the examiner the student chose
+# (2026-11-17: "examiner nữ thì giọng feedback nữ và ngược lại, nam đổi sang Fenrir").
+# Gemini/Chirp3-HD star names; the same name exists in both engines, so the Chirp fallback
+# keeps the same speaker too. SPEAKING_LIVE_VOICE is the older single-voice setting and
+# still overrides the male voice if set.
+LIVE_VOICE_MALE = (os.getenv("SPEAKING_LIVE_VOICE_MALE") or os.getenv("SPEAKING_LIVE_VOICE") or "Fenrir").strip()
+LIVE_VOICE_FEMALE = (os.getenv("SPEAKING_LIVE_VOICE_FEMALE") or "Kore").strip()
+LIVE_VOICE = LIVE_VOICE_MALE
 _FEMALE_STARS = {'Achernar', 'Aoede', 'Autonoe', 'Callirrhoe', 'Despina', 'Erinome', 'Gacrux', 'Kore',
                  'Laomedeia', 'Leda', 'Pulcherrima', 'Sulafat', 'Vindemiatrix', 'Zephyr'}
 LIVE_GENDER = 'female' if LIVE_VOICE in _FEMALE_STARS else 'male'
-_PERSONA = ("Voice: always the same person, a confident " +
-            ('woman in her' if LIVE_GENDER == 'female' else 'man in his') +
+
+
+def _persona(gender: str) -> str:
+    """Fixed character sheet sent with every request so each clip sounds like the same person."""
+    return ("Voice: always the same person, a confident " +
+            ('woman in her' if gender == 'female' else 'man in his') +
             " mid-thirties with a warm, clear, "
             "medium-pitched voice and steady volume. Keep this exact voice, accent and microphone distance "
             "from start to finish; only the tone changes, never the voice itself")
+
+
+_PERSONA = _persona(LIVE_GENDER)
 GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "12"))
 # Chirp speaking rate: a bit quicker than normal so the roast lands ("đọc nhanh lên cho catchy").
 CHIRP_RATE = float(os.getenv("SPEAKING_LIVE_CHIRP_RATE", "1.05"))
@@ -245,6 +255,21 @@ def _examiner_star_and_lang(voice: str):
     return _FALLBACK_STAR.get(gender, 'Charon'), (meta or {}).get('lang', 'en-GB')
 
 
+def _examiner_gender(voice: str) -> str:
+    from app.utils import speaking_tts as T
+    meta = T.GOOGLE_VOICES.get(voice or '') or {}
+    return meta.get('gender') or T.GEMINI_GENDER.get(voice or '', 'male')
+
+
+def _live_star(examiner_voice: str):
+    """(star, gender) of the fixed feedback voice matching the examiner's gender."""
+    gender = 'female' if _examiner_gender(examiner_voice) == 'female' else 'male'
+    star = LIVE_VOICE_FEMALE if gender == 'female' else LIVE_VOICE_MALE
+    if star not in _gemini_names():
+        star = 'Kore' if gender == 'female' else 'Fenrir'
+    return star, gender
+
+
 def _google_voice(text: str, star: str, locale: str):
     from app.utils import google_tts
     mp3 = google_tts.synthesize(text, f"{locale}-Chirp3-HD-{star}", locale, CHIRP_RATE)
@@ -266,14 +291,15 @@ _MOOD_STYLE = {
 def _gemini_voice(text: str, star: str, mood: str, lang: str):
     """Gemini TTS takes a director's note before the text; it is not read out."""
     from app.utils import speaking_tts as T
+    persona = _persona('female' if star in _FEMALE_STARS else 'male')
     tone = _MOOD_STYLE.get(mood, _MOOD_STYLE['sarcastic'])
     name = LANGS.get(lang, LANGS['en'])[0]
     if lang == 'en':
-        note = (f"{_PERSONA}. Role: a sarcastic, expressive native English-speaking IELTS examiner roasting a "
+        note = (f"{persona}. Role: a sarcastic, expressive native English-speaking IELTS examiner roasting a "
                 f"student face to face. Tone for this line: {tone}. Natural conversational rhythm, a brisk "
                 f"lively pace, stress the key words, short pause before the punchline")
     else:
-        note = (f"{_PERSONA}. Role: a sarcastic, expressive IELTS examiner who is a native {name} speaker, "
+        note = (f"{persona}. Role: a sarcastic, expressive IELTS examiner who is a native {name} speaker, "
                 f"roasting a student face to face in everyday spoken {name}. Tone for this line: {tone}. "
                 f"Natural conversational rhythm, a brisk lively pace, stress the key words, short pause before "
                 f"the punchline. Say the English words in quotes with a clear, natural English accent, then "
@@ -292,7 +318,7 @@ def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
         return None, None
     from app.utils import google_tts
     _, en_locale = _examiner_star_and_lang(examiner_voice)
-    star = LIVE_VOICE if LIVE_VOICE in _gemini_names() else 'Puck'
+    star, _ = _live_star(examiner_voice)
     locale = en_locale if lang == 'en' else LANGS.get(lang, (None, None))[1]
 
     def gemini():
@@ -348,6 +374,7 @@ def feedback(question: str, part: str, lang: str, examiner_voice: str,
     result = analyse(question, part, lang, typed=typed, audio=audio, audio_mime=audio_mime)
     t1 = time.monotonic()
     data, mime = voice(result['feedback'], examiner_voice, lang, result['mood'])
+    _, gender = _live_star(examiner_voice)
     t2 = time.monotonic()
     engine = {'audio/ogg': 'gemini', 'audio/mpeg': 'google-chirp'}.get(mime, 'none')
     logger.info("live feedback: analyse %.1fs, voice %.1fs, engine=%s", t1 - t0, t2 - t1, engine)
@@ -357,5 +384,5 @@ def feedback(question: str, part: str, lang: str, examiner_voice: str,
         'audio': base64.b64encode(data).decode() if data else None,
         'audio_mime': mime,
         'engine': engine,
-        'voice_gender': LIVE_GENDER,
+        'voice_gender': gender,
     }
