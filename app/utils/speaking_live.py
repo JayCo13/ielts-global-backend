@@ -25,11 +25,18 @@ import logging
 import os
 import threading
 import time
+import unicodedata
 from datetime import date
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.getenv("SPEAKING_LIVE_MODEL") or None     # None = gemini_client default (Flash-Lite)
+# Flash, not Flash-Lite: Flash-Lite wrote stiff, translated-sounding Vietnamese (feedback
+# 2026-11-17 "câu từ quá máy móc"). Set SPEAKING_LIVE_MODEL=gemini-flash-lite-latest to go back.
+MODEL = os.getenv("SPEAKING_LIVE_MODEL") or "gemini-flash-latest"
+# Which TTS speaks first: "gemini" (default; far more natural and emotional, handles English
+# words inside another language) or "google" (Chirp3-HD; faster, flatter). The other one is
+# the fallback either way.
+TTS_FIRST = (os.getenv("SPEAKING_LIVE_TTS") or "gemini").strip().lower()
 DAILY_LIMIT = int(os.getenv("SPEAKING_LIVE_DAILY_LIMIT", "150"))
 MAX_WORDS = 120
 
@@ -117,9 +124,21 @@ STYLE: Short, Sharp, Funny & Memorable
 
 LANGUAGE
 - Write the feedback in {lang}. Keep the candidate's English words, the corrected English phrases and the English example in English (quoted), because they must answer in English.
-- The candidate must always answer in English; never suggest otherwise.
+- Write it the way a native {lang} speaker actually TALKS to a student face to face: casual, warm, everyday spoken words, natural interjections and sentence particles. It must never sound like a translation from English, a textbook or a robot. If a sentence would sound stiff when said out loud, rewrite it.
+- Keep the English parts short (a few words each) so the speech flows.
+{lang_tips}- The candidate must always answer in English; never suggest otherwise.
 
 Return JSON only: {{"mood": one of {moods}, "feedback": "<what you say>"}}"""
+
+
+# Extra, language-specific hints for sounding like a real person instead of a translation.
+_LANG_TIPS = {
+    'vi': ("- Vietnamese: talk like a fun young Vietnamese teacher chatting with a student. Call the student \"bạn\" "
+           "and yourself \"tôi\" or \"mình\". Use natural spoken Vietnamese: \"Trời ơi\", \"Ủa\", \"Khoan đã\", \"Nghe nè\", "
+           "\"thôi xong\", \"nha\", \"đó\", \"luôn\", \"hả\", \"chứ\", \"vậy\". Avoid stiff written words such as "
+           "\"tuy nhiên\", \"do đó\", \"lỗi sai này\", \"cụm từ\", \"cấu trúc\", \"việc\", \"đối với\". "
+           "Never translate English sentences word for word.\n"),
+}
 
 
 def _user_text(question: str, part: str, typed: str, has_audio: bool) -> str:
@@ -150,12 +169,14 @@ def analyse(question: str, part: str, lang: str, typed: str = '', audio: bytes =
     """{'mood', 'feedback'} — raises gemini_client errors on failure."""
     from app.utils import gemini_client
     name = LANGS.get(lang, LANGS['en'])[0]
-    system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS))
+    system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
     media = [(audio_mime, audio)] if audio else None
     out = gemini_client.generate_json(
         system, _user_text(question, part, typed, bool(audio)), media=media, model=MODEL,
         max_output_tokens=1024, temperature=0.9, retries=2, busy_backoff=1.0)
-    feedback = _clip_words(str(out.get('feedback') or '').strip())
+    # NFC: some outputs carry decomposed Vietnamese diacritics, which break when the room
+    # reveals the text piece by piece.
+    feedback = _clip_words(unicodedata.normalize('NFC', str(out.get('feedback') or '').strip()))
     mood = str(out.get('mood') or '').strip().lower()
     return {'feedback': feedback, 'mood': mood if mood in MOODS else 'amused'}
 
@@ -194,10 +215,23 @@ _MOOD_STYLE = {
 }
 
 
-def _gemini_voice(text: str, star: str, mood: str):
+def _gemini_voice(text: str, star: str, mood: str, lang: str):
+    """Gemini TTS takes a director's note before the text; it is not read out."""
     from app.utils import speaking_tts as T
     style = _MOOD_STYLE.get(mood, 'with a lively, expressive personality')
-    pcm = T._pcm(f"Say this like a witty IELTS examiner, {style}, emphasising the key words: {text}", star)
+    name = LANGS.get(lang, LANGS['en'])[0]
+    if lang == 'en':
+        note = (f"Read this aloud as a witty, charismatic native English-speaking IELTS examiner talking "
+                f"face to face with a student, {style}. Sound like a real person reacting in the moment: "
+                f"relaxed, conversational, natural rhythm, small pauses, real emotion, stress on the key "
+                f"words. Not a newsreader, not an audiobook")
+    else:
+        note = (f"Read this aloud as a witty, warm IELTS examiner who is a native {name} speaker, talking "
+                f"face to face with a student, {style}. Speak natural, relaxed, everyday {name} with real "
+                f"emotion, natural rhythm and small pauses, like chatting with a friend, not a newsreader "
+                f"or a robot. Say the English words and phrases in quotes with a clear, natural English accent, "
+                f"then switch straight back to {name}")
+    pcm = T._pcm(f"{note}:\n\n{text}", star)
     return T._to_opus(pcm), 'audio/ogg'
 
 
@@ -209,16 +243,29 @@ def voice(text: str, examiner_voice: str, lang: str, mood: str = 'amused'):
     from app.utils import google_tts
     star, en_locale = _examiner_star_and_lang(examiner_voice)
     locale = en_locale if lang == 'en' else LANGS.get(lang, (None, None))[1]
-    if locale and google_tts.is_configured():
+
+    def gemini():
+        if not os.getenv("GEMINI_API_KEY"):
+            return None
+        try:
+            return _gemini_voice(text, star if star in _gemini_names() else 'Achird', mood, lang)
+        except Exception as e:
+            logger.warning("live feedback: Gemini TTS failed: %s", e)
+            return None
+
+    def chirp():
+        if not (locale and google_tts.is_configured()):
+            return None
         try:
             return _google_voice(text, star, locale)
         except Exception as e:
             logger.warning("live feedback: Chirp3-HD (%s) failed: %s", locale, e)
-    if os.getenv("GEMINI_API_KEY"):
-        try:
-            return _gemini_voice(text, star if star in _gemini_names() else 'Achird', mood)
-        except Exception as e:
-            logger.warning("live feedback: Gemini TTS failed: %s", e)
+            return None
+
+    for engine in ((chirp, gemini) if TTS_FIRST == 'google' else (gemini, chirp)):
+        out = engine()
+        if out:
+            return out
     return None, None
 
 
