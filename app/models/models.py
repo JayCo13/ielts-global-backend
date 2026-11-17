@@ -1612,3 +1612,30 @@ class CreatorReconciliationItem(Base):
     # 2026-11 feedback: optional proof (screenshots / screen recordings of total views),
     # JSON list of public R2 URLs uploaded via POST /creator-hub/proofs.
     proof_urls = Column(Text, nullable=True)
+
+
+class CheckoutIntent(Base):
+    """A signed-in user opened the payment page for a VIP package (feedback 2026-11-14,
+    "chính sách email mới"). Used only to send ONE reminder email when no payment follows."""
+    __tablename__ = 'checkout_intents'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    package_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None), index=True)
+
+
+class MarketingEmailLog(Base):
+    """Automated lifecycle emails (welcome / abandoned checkout). The unique key is also
+    the cross-worker claim: a row is inserted BEFORE sending, so two workers can never
+    send the same email."""
+    __tablename__ = 'marketing_email_logs'
+    __table_args__ = (UniqueConstraint('user_id', 'kind', 'ref', name='uq_marketing_email_user_kind_ref'),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    kind = Column(String(40), nullable=False)            # welcome / abandoned_checkout
+    ref = Column(String(64), nullable=False, default='')
+    email = Column(String(255), nullable=True)
+    status = Column(String(20), nullable=False, default='sending')   # sending / sent / failed / skipped
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None), index=True)

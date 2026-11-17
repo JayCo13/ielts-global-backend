@@ -29,6 +29,10 @@ async def startup_event():
         logger.info("Database connection pool pre-warmed successfully")
     except Exception as e:
         logger.warning(f"DB pre-warm failed (will retry on first request): {e}")
+    # Lifecycle emails (welcome / abandoned checkout) — see app/utils/email_automation.py
+    import asyncio
+    from app.utils.email_automation import automation_loop
+    asyncio.create_task(automation_loop())
     logger.info("Application startup completed")
 
 @app.on_event("shutdown")

@@ -51,6 +51,7 @@ from .admin.affiliate_admin import router as affiliate_admin_router
 from .customer.creator_program import router as creator_program_router
 from .admin.creator_program_admin import router as creator_program_admin_router
 from .customer.creator_hub import router as creator_hub_router
+from .customer.checkout_intent import router as checkout_intent_router
 from .admin.creator_hub_admin import router as creator_hub_admin_router
 
 router = APIRouter()
@@ -135,4 +136,5 @@ router.include_router(affiliate_admin_router, prefix="/admin", tags=["admin-affi
 router.include_router(creator_program_router, tags=["creator-program"])
 router.include_router(creator_program_admin_router, prefix="/admin", tags=["admin-creator-program"])
 router.include_router(creator_hub_router, tags=["creator-hub"])
+router.include_router(checkout_intent_router, tags=["email-automation"])
 router.include_router(creator_hub_admin_router, prefix="/admin", tags=["admin-creator-hub"])
