@@ -25,6 +25,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import unicodedata
 from datetime import date
 
@@ -37,6 +38,12 @@ MODEL = os.getenv("SPEAKING_LIVE_MODEL") or "gemini-flash-latest"
 # words inside another language) or "google" (Chirp3-HD; faster, flatter). The other one is
 # the fallback either way.
 TTS_FIRST = (os.getenv("SPEAKING_LIVE_TTS") or "gemini").strip().lower()
+# Used when the main model fails (busy, quota, blocked): the student still gets feedback.
+FALLBACK_MODEL = "gemini-flash-lite-latest"
+# Seconds to wait for Gemini TTS before using the Chirp3-HD voice made in parallel. The room
+# gives up after 30s in total, so analysis + voice must stay well inside that.
+GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "9"))
+_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="live-tts")
 DAILY_LIMIT = int(os.getenv("SPEAKING_LIVE_DAILY_LIMIT", "150"))
 MAX_WORDS = 120
 
@@ -180,9 +187,22 @@ def analyse(question: str, part: str, lang: str, typed: str = '', audio: bytes =
     name = LANGS.get(lang, LANGS['en'])[0]
     system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
     media = [(audio_mime, audio)] if audio else None
-    out = gemini_client.generate_json(
-        system, _user_text(question, part, typed, bool(audio)), media=media, model=MODEL,
-        max_output_tokens=1024, temperature=0.9, retries=2, busy_backoff=1.0)
+    user = _user_text(question, part, typed, bool(audio))
+    try:
+        out = gemini_client.generate_json(
+            system, user, media=media, model=MODEL, max_output_tokens=1024, temperature=0.9,
+            retries=1, busy_backoff=1.0, safety_off=True)
+        if not str(out.get('feedback') or '').strip():
+            raise gemini_client.GeminiError("empty feedback")
+    except gemini_client.GeminiNotConfigured:
+        raise
+    except Exception as e:
+        if (MODEL or '') == FALLBACK_MODEL:
+            raise
+        logger.warning("live feedback: %s failed (%s), retrying on %s", MODEL, e, FALLBACK_MODEL)
+        out = gemini_client.generate_json(
+            system, user, media=media, model=FALLBACK_MODEL, max_output_tokens=1024,
+            temperature=0.9, retries=2, busy_backoff=1.0, safety_off=True)
     # NFC: some outputs carry decomposed Vietnamese diacritics, which break when the room
     # reveals the text piece by piece.
     feedback = _clip_words(unicodedata.normalize('NFC', str(out.get('feedback') or '').strip()))
@@ -275,11 +295,23 @@ def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
             logger.warning("live feedback: Chirp3-HD (%s) failed: %s", locale, e)
             return None
 
-    for engine in ((chirp, gemini) if TTS_FIRST == 'google' else (gemini, chirp)):
-        out = engine()
-        if out:
-            return out
-    return None, None
+    if TTS_FIRST == 'google':
+        return chirp() or gemini() or (None, None)
+    # Gemini TTS sounds far better but can be slow or out of quota: start Chirp at the same
+    # time and use it if Gemini has not answered within the budget.
+    g = _pool.submit(gemini)
+    c = _pool.submit(chirp)
+    try:
+        out = g.result(timeout=GEMINI_TTS_BUDGET)
+    except FutureTimeout:
+        logger.warning("live feedback: Gemini TTS slower than %ss, using Chirp3-HD", GEMINI_TTS_BUDGET)
+        out = None
+    if out:
+        return out
+    try:
+        return c.result(timeout=10) or (None, None)
+    except Exception:
+        return None, None
 
 
 def _gemini_names():

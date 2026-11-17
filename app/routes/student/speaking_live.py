@@ -80,4 +80,9 @@ async def live_feedback(attempt_id: int,
     except Exception as e:
         speaking_live.give_back(current_student.user_id)
         logger.warning("live feedback failed (attempt %s, q %s): %s", attempt_id, order_index, e)
-        raise HTTPException(status_code=502, detail="The examiner could not give feedback this time.")
+        # The short reason after the message helps support read a screenshot (no secrets in it).
+        reason = type(e).__name__
+        if 'HTTP' in str(e):
+            reason += ' ' + str(e).split('HTTP', 1)[1][:4].strip()
+        raise HTTPException(status_code=502,
+                            detail=f"The examiner could not give feedback this time. ({reason})")

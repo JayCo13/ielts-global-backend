@@ -79,7 +79,8 @@ def _api_key() -> str:
 def generate_json(system: str, user_text: str, images=None, *,
                   media=None, model: str = None, max_output_tokens: int = 8192,
                   think_longer: bool = False, temperature: float = 0.3,
-                  retries: int = 3, busy_backoff: float = 3.0) -> dict:
+                  retries: int = 3, busy_backoff: float = 3.0,
+                  safety_off: bool = False) -> dict:
     """Call Gemini and return the parsed JSON object.
 
     media: list of (mime_type, raw_bytes) inlined alongside the text — Task 1 charts for
@@ -119,6 +120,14 @@ def generate_json(system: str, user_text: str, images=None, *,
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
+    if safety_off:
+        # Opt-in per caller (Speaking Live Action roasts on purpose); everyone else keeps
+        # Gemini's defaults.
+        body["safetySettings"] = [
+            {"category": c, "threshold": "BLOCK_NONE"}
+            for c in ("HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
+                      "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT")
+        ]
 
     # Up to 3 attempts: retries transient 429/5xx AND a 200 whose JSON is truncated/
     # malformed (Flash-Lite occasionally emits invalid JSON on large outputs).
