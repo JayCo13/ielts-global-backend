@@ -127,6 +127,9 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
     for t in all_forecast_tasks:
         tasks_by_exam.setdefault(t.test_id, []).append(t)
 
+    from app.utils.writing_titles import part_titles
+    display_titles = part_titles(db, all_forecast_tasks)
+
     result = []
     for exam in exams:
         forecast_tasks = tasks_by_exam.get(exam.exam_id, [])
@@ -156,7 +159,8 @@ async def get_public_writing_forecasts(db: Session = Depends(get_db)):
                 "word_limit": t.word_limit,
                 "is_recommended": bool(getattr(t, 'is_recommended', False)),
                 "difficulty_label": t.difficulty_label,
-                "forecast_level": t.forecast_level
+                "forecast_level": t.forecast_level,
+                "display_title": display_titles.get(t.task_id, ""),
             } for t in forecast_tasks]
         })
 

@@ -2255,6 +2255,10 @@ async def get_writing_tasks(
     from app.routes.AI.writing_ai import is_vip as _has_writing_vip
     writing_vip = current_student.role == 'student' or _has_writing_vip(current_student, db)
 
+    # Part titles auto-taken from each prompt (feedback 2026-11-14), cached per task.
+    from app.utils.writing_titles import part_titles
+    display_titles = part_titles(db, all_tasks)
+
     # Build response using pre-loaded data
     exam_details = []
     for exam in exams:
@@ -2313,7 +2317,8 @@ async def get_writing_tasks(
                 "total_marks": task.total_marks,
                 "duration": task.duration,
                 "difficulty_label": task.difficulty_label,
-                "forecast_level": task.forecast_level
+                "forecast_level": task.forecast_level,
+                "display_title": display_titles.get(task.task_id, ""),
             } for task in tasks]
         })
 
