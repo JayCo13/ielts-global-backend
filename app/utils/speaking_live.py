@@ -42,13 +42,12 @@ TTS_FIRST = (os.getenv("SPEAKING_LIVE_TTS") or "gemini").strip().lower()
 FALLBACK_MODEL = "gemini-flash-lite-latest"
 # Seconds to wait for Gemini TTS before using the Chirp3-HD voice made in parallel. The room
 # gives up after 30s in total, so analysis + voice must stay well inside that.
-GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "7"))
+# 12s: shorter than this pushed most answers onto the flatter Chirp voice (2026-11-17,
+# "giọng không còn hay"). The room waits 30s in total.
+GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "12"))
 # Chirp speaking rate: a bit quicker than normal so the roast lands ("đọc nhanh lên cho catchy").
-CHIRP_RATE = float(os.getenv("SPEAKING_LIVE_CHIRP_RATE", "1.15"))
+CHIRP_RATE = float(os.getenv("SPEAKING_LIVE_CHIRP_RATE", "1.05"))
 _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="live-tts")
-# Separate pool for the per-chunk Gemini TTS calls, so a busy _pool can never deadlock
-# waiting on chunks queued behind it.
-_chunk_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="live-tts-chunk")
 DAILY_LIMIT = int(os.getenv("SPEAKING_LIVE_DAILY_LIMIT", "150"))
 MAX_WORDS = 75     # hard cap; the prompt asks for ≤ 55 (feedback 2026-11-17: shorter, faster)
 
@@ -269,30 +268,12 @@ def _gemini_voice(text: str, star: str, mood: str, lang: str):
                 f"purpose before and after the jabs. Never flat, never a newsreader or a robot. Say the English "
                 f"words and phrases in quotes with a clear, natural English accent, then switch straight back "
                 f"to {name}")
-    note += ". Pace: FAST, quick-fire and punchy, like a stand-up comic, no slow drawl except on the one word you stretch for effect"
-    # Gemini TTS time grows with the length of the audio, so say the two halves in
-    # parallel and join the raw PCM (same voice, same format, no seam to re-encode).
-    chunks = _split_for_tts(text)
-    if len(chunks) == 1:
-        pcm = T._pcm(f"{note}:\n\n{text}", star)
-    else:
-        futures = [_chunk_pool.submit(T._pcm, f"{note}:\n\n{c}", star) for c in chunks]
-        pcm = b''.join(f.result(timeout=GEMINI_TTS_BUDGET + 5) for f in futures)
+    note += ". Keep a brisk, lively pace"
+    # ONE call for the whole text. Splitting it in two halves was faster but broke the
+    # intonation at the join and used two requests of the Gemini TTS daily quota per
+    # feedback, so the quota ran out and everything fell back to Chirp (2026-11-17).
+    pcm = T._pcm(f"{note}:\n\n{text}", star)
     return T._to_opus(pcm), 'audio/ogg'
-
-
-def _split_for_tts(text: str):
-    """One chunk for short text, else two halves cut at the sentence end nearest the middle."""
-    import re
-    if len(text.split()) < 24:
-        return [text]
-    ends = [m.end() for m in re.finditer(r'[.!?…。！？]+["”\')]*\s+', text)]
-    if not ends:
-        return [text]
-    mid = len(text) / 2
-    cut = min(ends, key=lambda e: abs(e - mid))
-    a, b = text[:cut].strip(), text[cut:].strip()
-    return [a, b] if a and b else [text]
 
 
 def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
@@ -310,7 +291,8 @@ def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
         try:
             return _gemini_voice(text, star if star in _gemini_names() else 'Achird', mood, lang)
         except Exception as e:
-            logger.warning("live feedback: Gemini TTS failed: %s", e)
+            # TtsQuota = the Gemini TTS daily cap is used up → Chirp until it resets.
+            logger.warning("live feedback: Gemini TTS failed (%s): %s", type(e).__name__, e)
             return None
 
     def chirp():
@@ -357,10 +339,12 @@ def feedback(question: str, part: str, lang: str, examiner_voice: str,
     t1 = time.monotonic()
     data, mime = voice(result['feedback'], examiner_voice, lang, result['mood'])
     t2 = time.monotonic()
-    logger.info("live feedback: analyse %.1fs, voice %.1fs (%s)", t1 - t0, t2 - t1, mime or 'none')
+    engine = {'audio/ogg': 'gemini', 'audio/mpeg': 'google-chirp'}.get(mime, 'none')
+    logger.info("live feedback: analyse %.1fs, voice %.1fs, engine=%s", t1 - t0, t2 - t1, engine)
     return {
         'feedback': result['feedback'],
         'mood': result['mood'],
         'audio': base64.b64encode(data).decode() if data else None,
         'audio_mime': mime,
+        'engine': engine,
     }
