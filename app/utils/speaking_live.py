@@ -21,6 +21,7 @@ Env:
   SPEAKING_LIVE_DAILY_LIMIT  feedbacks per user per day, per worker (default 150)
 """
 import base64
+import random
 import logging
 import os
 import threading
@@ -72,7 +73,9 @@ GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "12"))
 CHIRP_RATE = float(os.getenv("SPEAKING_LIVE_CHIRP_RATE", "1.05"))
 _pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="live-tts")
 DAILY_LIMIT = int(os.getenv("SPEAKING_LIVE_DAILY_LIMIT", "150"))
-MAX_WORDS = 75     # hard cap; the prompt asks for ≤ 55 (feedback 2026-11-17: shorter, faster)
+# Hard cap; the prompt asks for ≤ 40. Shorter text = shorter TTS = examiner talks sooner
+# (2026-11-17 "tốc độ trả lời còn chậm").
+MAX_WORDS = 60
 
 # UI language code → (name used in the prompt, Google TTS locale or None).
 # None = Chirp3-HD has no voice for it; the Gemini TTS fallback is multilingual.
@@ -157,10 +160,11 @@ HOW TO REACT: SARCASM IS THE DEFAULT
 ORDER (flexible, not every part needed): 1) roast / emotional reaction, 2) the mistake with their own words, 3) the fix, 4) optionally one short, unexpected closing jab.
 
 SHORT, SHARP, SARCASTIC & MEMORABLE
-- Maximum 55 words in total (about 20 seconds spoken). One mistake only = even shorter. Every word must earn its place: cut warm-up, cut repetition.
+- Maximum 40 words in total (about 15 seconds spoken). One mistake only = even shorter. Every word must earn its place: cut warm-up, cut repetition.
 - No greetings, no intro, no summary, no grammar lecture, no lists, no repeating an explanation, no band score or scoring of any kind. No hollow comfort like "good attempt" or "well done" when the answer was full of mistakes.
 - At least one memorable roast line in every answer that has a noticeable mistake.
-- Invent NEW jokes from THIS answer every time. These only show the flavour, never reuse them: "Studied English for ten years and this is the answer?", "You said 'lay' instead of 'play'. Planning to lay eggs?", "Did the verbs do something to you? Why treat them like this?", "You used 'very good' so many times I think your dictionary only has two words left."
+- Invent NEW jokes from THIS answer every time, built from its own words and topic. Never fall back on stock lines or the same opening exclamation; a real comedian never tells the same joke twice to the same student.
+- Wide, vivid vocabulary: vary your exclamations, verbs, comparisons and sentence shapes. Do not start two feedbacks the same way.
 - Write it as SPEECH for a voice actor: short punchy sentences, exclamations, rhetorical questions, dramatic pauses written as "..." . No markdown, no emoji, no bullet points, no phonetic symbols like /ɪ/; spell sounds the way people say them.
 
 LANGUAGE
@@ -178,18 +182,51 @@ Return JSON only: {{"mood": one of {moods}, "feedback": "<what you say>"}}"""
 _LANG_TIPS = {
     'vi': ("- Vietnamese: talk like a sharp-tongued, dramatic Vietnamese examiner roasting a student. Call the student \"bạn\" "
            "and yourself \"tôi\". Use natural spoken Vietnamese: \"Trời ơi\", \"Trời đất ơi\", \"Ủa\", \"Khoan đã!\", \"hả trời\", "
-           "\"thôi xong\", \"nha\", \"đó\", \"luôn\", \"hả\", \"chứ\", \"vậy\", \"dữ vậy\". Avoid stiff written words such as "
+           "\"thôi xong\", \"nha\", \"đó\", \"luôn\", \"hả\", \"chứ\", \"vậy\", \"dữ vậy\", \"Má ơi\", \"Ơ kìa\", "
+           "\"Hả, gì cơ?\", \"Thôi chết\", \"Nghe mà muốn xỉu\", \"Xin bạn đó\", \"Đỉnh thật sự\", \"Gì kỳ vậy\", "
+           "\"Nói thật nha\", \"Tôi chịu luôn\", \"Cạn lời\". These are only examples: vary them, use each rarely, "
+           "and often open with no interjection at all. Avoid stiff written words such as "
            "\"tuy nhiên\", \"do đó\", \"lỗi sai này\", \"cụm từ\", \"cấu trúc\", \"việc\", \"đối với\". "
            "Never translate English sentences word for word.\n"),
 }
 
 
-def _user_text(question: str, part: str, typed: str, has_audio: bool) -> str:
+# One comic device and one opening shape are drawn at random for every answer, so a
+# whole test doesn't sound like the same joke on repeat (2026-11-17 "feedback trùng nhiều").
+_ANGLES = (
+    "an absurd, oddly specific comparison from everyday life (food, traffic, pets, a phone battery, a broken printer...)",
+    "a mini dramatic scene, as if the mistake were a crime, a disaster movie or a sports commentary",
+    "fake-serious official tone, like announcing breaking news or reading a court verdict about the mistake",
+    "a rhetorical question that turns their own words against them",
+    "personifying the misused word or grammar as a victim that is suffering or complaining",
+    "pretending to misunderstand them literally, showing how funny the wrong word sounds",
+    "mock self-pity: you, the examiner, suffering and needing a break after hearing it",
+    "a quick countdown or exaggerated number joke about how many times it happened",
+    "sarcastic fake praise that flips into the real problem",
+    "a playful 'imagine if' scenario of a native speaker hearing this sentence",
+)
+_OPENINGS = (
+    "Open by quoting their exact words back at them.",
+    "Open with a short rhetorical question.",
+    "Open with a dramatic one-word or two-word reaction you have not used before.",
+    "Open straight into the joke, no exclamation.",
+    "Open with a fake calm, deadpan statement.",
+)
+
+
+def _user_text(question: str, part: str, typed: str, has_audio: bool, recent=None) -> str:
     lines = [f"IELTS Speaking {part.replace('_', ' ')} question: {question}"]
     if typed:
         lines.append(f'The candidate typed their answer: "{typed}"')
     if has_audio:
         lines.append("The candidate's spoken answer is attached as audio.")
+    lines.append(f"Style for THIS feedback if there is a mistake to roast: use {random.choice(_ANGLES)}. "
+                 f"{random.choice(_OPENINGS)}")
+    recent = [r for r in (recent or []) if r][-4:]
+    if recent:
+        lines.append("You already said these to this candidate earlier in the test. Do NOT reuse their "
+                     "openings, exclamations, jokes, images or phrasing; sound fresh:")
+        lines += [f'- "{r[:300]}"' for r in recent]
     lines.append("Give your live feedback now.")
     return "\n".join(lines)
 
@@ -208,16 +245,16 @@ def _clip_words(text: str) -> str:
 
 
 def analyse(question: str, part: str, lang: str, typed: str = '', audio: bytes = None,
-            audio_mime: str = 'audio/ogg') -> dict:
+            audio_mime: str = 'audio/ogg', recent=None) -> dict:
     """{'mood', 'feedback'} — raises gemini_client errors on failure."""
     from app.utils import gemini_client
     name = LANGS.get(lang, LANGS['en'])[0]
     system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
     media = [(audio_mime, audio)] if audio else None
-    user = _user_text(question, part, typed, bool(audio))
+    user = _user_text(question, part, typed, bool(audio), recent)
     try:
         out = gemini_client.generate_json(
-            system, user, media=media, model=MODEL, max_output_tokens=1024, temperature=0.9,
+            system, user, media=media, model=MODEL, max_output_tokens=1024, temperature=1.05,
             retries=1, busy_backoff=1.0, safety_off=True)
         if not str(out.get('feedback') or '').strip():
             raise gemini_client.GeminiError("empty feedback")
@@ -229,7 +266,7 @@ def analyse(question: str, part: str, lang: str, typed: str = '', audio: bytes =
         logger.warning("live feedback: %s failed (%s), retrying on %s", MODEL, e, FALLBACK_MODEL)
         out = gemini_client.generate_json(
             system, user, media=media, model=FALLBACK_MODEL, max_output_tokens=1024,
-            temperature=0.9, retries=2, busy_backoff=1.0, safety_off=True)
+            temperature=1.05, retries=2, busy_backoff=1.0, safety_off=True)
     # NFC: some outputs carry decomposed Vietnamese diacritics, which break when the room
     # reveals the text piece by piece.
     feedback = _clip_words(unicodedata.normalize('NFC', str(out.get('feedback') or '').strip()))
@@ -369,9 +406,9 @@ def _gemini_names():
 
 
 def feedback(question: str, part: str, lang: str, examiner_voice: str,
-             typed: str = '', audio: bytes = None, audio_mime: str = 'audio/ogg') -> dict:
+             typed: str = '', audio: bytes = None, audio_mime: str = 'audio/ogg', recent=None) -> dict:
     t0 = time.monotonic()
-    result = analyse(question, part, lang, typed=typed, audio=audio, audio_mime=audio_mime)
+    result = analyse(question, part, lang, typed=typed, audio=audio, audio_mime=audio_mime, recent=recent)
     t1 = time.monotonic()
     data, mime = voice(result['feedback'], examiner_voice, lang, result['mood'])
     _, gender = _live_star(examiner_voice)

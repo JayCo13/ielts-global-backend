@@ -4,6 +4,7 @@ The room calls this IN PARALLEL with the normal `/answers` upload, sending the s
 recording, so the examiner can start talking without waiting for R2 + Whisper. Nothing is
 stored and the official grading is untouched.
 """
+import json
 import logging
 from typing import Optional
 
@@ -33,6 +34,7 @@ async def live_feedback(attempt_id: int,
                         order_index: int = Form(...),
                         lang: str = Form('en'),
                         text: Optional[str] = Form(None),
+                        recent: Optional[str] = Form(None),
                         audio: Optional[UploadFile] = File(None),
                         current_student: User = Depends(get_current_student),
                         db: Session = Depends(get_db)):
@@ -52,6 +54,12 @@ async def live_feedback(attempt_id: int,
 
     lang = lang if lang in speaking_live.LANGS else 'en'
     typed = (text or '').strip()[:3000]
+    # The examiner's earlier lines in this test (JSON list from the room), so it doesn't repeat itself.
+    try:
+        got = json.loads(recent) if recent else []
+        prev = [str(r)[:400] for r in got][-4:] if isinstance(got, list) else []
+    except Exception:
+        prev = []
     raw = await audio.read() if audio is not None else b''
     if len(raw) > MAX_RECORDING_BYTES:
         raise HTTPException(status_code=413, detail="The recording is too large.")
@@ -73,7 +81,7 @@ async def live_feedback(attempt_id: int,
             if not ext:
                 mime = (audio.content_type or 'audio/webm').split(';')[0]
         return speaking_live.feedback(question, part, lang, voice, typed=typed,
-                                      audio=clip, audio_mime=mime)
+                                      audio=clip, audio_mime=mime, recent=prev)
 
     try:
         return await run_in_threadpool(work)
