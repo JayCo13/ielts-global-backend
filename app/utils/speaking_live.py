@@ -42,10 +42,15 @@ TTS_FIRST = (os.getenv("SPEAKING_LIVE_TTS") or "gemini").strip().lower()
 FALLBACK_MODEL = "gemini-flash-lite-latest"
 # Seconds to wait for Gemini TTS before using the Chirp3-HD voice made in parallel. The room
 # gives up after 30s in total, so analysis + voice must stay well inside that.
-GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "9"))
-_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="live-tts")
+GEMINI_TTS_BUDGET = float(os.getenv("SPEAKING_LIVE_TTS_BUDGET", "7"))
+# Chirp speaking rate: a bit quicker than normal so the roast lands ("đọc nhanh lên cho catchy").
+CHIRP_RATE = float(os.getenv("SPEAKING_LIVE_CHIRP_RATE", "1.15"))
+_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="live-tts")
+# Separate pool for the per-chunk Gemini TTS calls, so a busy _pool can never deadlock
+# waiting on chunks queued behind it.
+_chunk_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="live-tts-chunk")
 DAILY_LIMIT = int(os.getenv("SPEAKING_LIVE_DAILY_LIMIT", "150"))
-MAX_WORDS = 120
+MAX_WORDS = 75     # hard cap; the prompt asks for ≤ 55 (feedback 2026-11-17: shorter, faster)
 
 # UI language code → (name used in the prompt, Google TTS locale or None).
 # None = Chirp3-HD has no voice for it; the Gemini TTS fallback is multilingual.
@@ -130,7 +135,7 @@ HOW TO REACT: SARCASM IS THE DEFAULT
 ORDER (flexible, not every part needed): 1) roast / emotional reaction, 2) the mistake with their own words, 3) the fix, 4) optionally one short, unexpected closing jab.
 
 SHORT, SHARP, SARCASTIC & MEMORABLE
-- Maximum 90 words in total (well under 60 seconds spoken). One mistake only = shorter.
+- Maximum 55 words in total (about 20 seconds spoken). One mistake only = even shorter. Every word must earn its place: cut warm-up, cut repetition.
 - No greetings, no intro, no summary, no grammar lecture, no lists, no repeating an explanation, no band score or scoring of any kind. No hollow comfort like "good attempt" or "well done" when the answer was full of mistakes.
 - At least one memorable roast line in every answer that has a noticeable mistake.
 - Invent NEW jokes from THIS answer every time. These only show the flavour, never reuse them: "Studied English for ten years and this is the answer?", "You said 'lay' instead of 'play'. Planning to lay eggs?", "Did the verbs do something to you? Why treat them like this?", "You used 'very good' so many times I think your dictionary only has two words left."
@@ -230,7 +235,7 @@ def _examiner_star_and_lang(voice: str):
 
 def _google_voice(text: str, star: str, locale: str):
     from app.utils import google_tts
-    mp3 = google_tts.synthesize(text, f"{locale}-Chirp3-HD-{star}", locale, 1.0)
+    mp3 = google_tts.synthesize(text, f"{locale}-Chirp3-HD-{star}", locale, CHIRP_RATE)
     return mp3, 'audio/mpeg'
 
 
@@ -264,8 +269,30 @@ def _gemini_voice(text: str, star: str, mood: str, lang: str):
                 f"purpose before and after the jabs. Never flat, never a newsreader or a robot. Say the English "
                 f"words and phrases in quotes with a clear, natural English accent, then switch straight back "
                 f"to {name}")
-    pcm = T._pcm(f"{note}:\n\n{text}", star)
+    note += ". Pace: FAST, quick-fire and punchy, like a stand-up comic, no slow drawl except on the one word you stretch for effect"
+    # Gemini TTS time grows with the length of the audio, so say the two halves in
+    # parallel and join the raw PCM (same voice, same format, no seam to re-encode).
+    chunks = _split_for_tts(text)
+    if len(chunks) == 1:
+        pcm = T._pcm(f"{note}:\n\n{text}", star)
+    else:
+        futures = [_chunk_pool.submit(T._pcm, f"{note}:\n\n{c}", star) for c in chunks]
+        pcm = b''.join(f.result(timeout=GEMINI_TTS_BUDGET + 5) for f in futures)
     return T._to_opus(pcm), 'audio/ogg'
+
+
+def _split_for_tts(text: str):
+    """One chunk for short text, else two halves cut at the sentence end nearest the middle."""
+    import re
+    if len(text.split()) < 24:
+        return [text]
+    ends = [m.end() for m in re.finditer(r'[.!?…。！？]+["”\')]*\s+', text)]
+    if not ends:
+        return [text]
+    mid = len(text) / 2
+    cut = min(ends, key=lambda e: abs(e - mid))
+    a, b = text[:cut].strip(), text[cut:].strip()
+    return [a, b] if a and b else [text]
 
 
 def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
