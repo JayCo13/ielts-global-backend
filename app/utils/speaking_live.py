@@ -216,6 +216,39 @@ _OPENINGS = (
 )
 
 
+# Vietnamese: ONE fixed regional accent per examiner gender, never a mix
+# (2026-11-18: "nam thì giọng nam, nữ thì giọng bắc").
+_VI_DIALECT = {
+    'male': {
+        'voice': ("Speak Vietnamese with a natural SOUTHERN (Saigon) accent all the way through, "
+                  "never switching to a Northern or Central accent"),
+        'words': ("- Vietnamese dialect: you are a man from Saigon. Use SOUTHERN spoken words only, e.g. "
+                  "\"nè\", \"nha\", \"hông\", \"dzậy\"/\"vậy\", \"hả\", \"trời đất\", \"má ơi\", "
+                  "\"thiệt\", \"cái gì dzậy trời\", \"bộ\". Never use Northern-only words such as "
+                  "\"thế\", \"nhé\", \"ạ\", \"ơ kìa\", \"chứ lị\".\n"),
+    },
+    'female': {
+        'voice': ("Speak Vietnamese with a natural NORTHERN (Hà Nội) accent all the way through, "
+                  "never switching to a Southern or Central accent"),
+        'words': ("- Vietnamese dialect: you are a woman from Hà Nội. Use NORTHERN spoken words only, e.g. "
+                  "\"nhé\", \"thế\", \"thế à\", \"ơ kìa\", \"trời ạ\", \"chứ\", \"đấy\", \"cơ\", "
+                  "\"gì thế này\", \"thật đấy\". Never use Southern-only words such as "
+                  "\"nè\", \"hông\", \"dzậy\", \"thiệt\", \"má ơi\".\n"),
+    },
+}
+
+
+def _lang_tips(lang: str, gender=None) -> str:
+    tips = _LANG_TIPS.get(lang, '')
+    if lang == 'vi' and gender in _VI_DIALECT:
+        tips += _VI_DIALECT[gender]['words']
+    return tips
+
+
+def _accent(lang: str, gender: str) -> str:
+    return _VI_DIALECT[gender]['voice'] + ". " if lang == 'vi' and gender in _VI_DIALECT else ''
+
+
 def _user_text(question: str, part: str, typed: str, has_audio: bool, recent=None) -> str:
     lines = [f"IELTS Speaking {part.replace('_', ' ')} question: {question}"]
     if typed:
@@ -247,11 +280,11 @@ def _clip_words(text: str) -> str:
 
 
 def analyse(question: str, part: str, lang: str, typed: str = '', audio: bytes = None,
-            audio_mime: str = 'audio/ogg', recent=None) -> dict:
+            audio_mime: str = 'audio/ogg', recent=None, gender=None) -> dict:
     """{'mood', 'feedback'} — raises gemini_client errors on failure."""
     from app.utils import gemini_client
     name = LANGS.get(lang, LANGS['en'])[0]
-    system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
+    system = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_lang_tips(lang, gender))
     media = [(audio_mime, audio)] if audio else None
     user = _user_text(question, part, typed, bool(audio), recent)
     try:
@@ -335,7 +368,8 @@ def _gemini_voice(text: str, star: str, mood: str, lang: str):
 
 
 def _gemini_prompt(text: str, star: str, mood: str, lang: str) -> str:
-    persona = _persona('female' if star in _FEMALE_STARS else 'male')
+    gender = 'female' if star in _FEMALE_STARS else 'male'
+    persona = _persona(gender)
     tone = _MOOD_STYLE.get(mood, _MOOD_STYLE['sarcastic'])
     name = LANGS.get(lang, LANGS['en'])[0]
     if lang == 'en':
@@ -346,8 +380,8 @@ def _gemini_prompt(text: str, star: str, mood: str, lang: str) -> str:
         note = (f"{persona}. Role: a sarcastic, expressive IELTS examiner who is a native {name} speaker, "
                 f"roasting a student face to face in everyday spoken {name}. Tone for this line: {tone}. "
                 f"Natural conversational rhythm, a brisk lively pace, stress the key words, short pause before "
-                f"the punchline. Say the English words in quotes with a clear, natural English accent, then "
-                f"switch straight back to {name}")
+                f"the punchline. {_accent(lang, gender)}Say the English words in quotes with a clear, natural "
+                f"English accent, then switch straight back to {name}")
     # ONE call for the whole text. Splitting it in two halves was faster but broke the
     # intonation at the join and used two requests of the Gemini TTS daily quota per
     # feedback, so the quota ran out and everything fell back to Chirp (2026-11-17).
@@ -540,13 +574,13 @@ def _to_pcm16k(raw: bytes):
 
 def _realtime_system(question, part, lang, gender, typed, has_audio, recent):
     name = LANGS.get(lang, LANGS['en'])[0]
-    base = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
+    base = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_lang_tips(lang, gender))
     base = base.split("\nMOOD:", 1)[0].rstrip()
     voice = (f"{_persona(gender)}. You are speaking out loud, live, face to face: a lively, quick, "
              f"expressive delivery with real emotion, stressing the key words. ")
     if lang != 'en':
-        voice += (f"Speak everyday spoken {name}; say the quoted English words with a clear, natural "
-                  f"English accent, then switch straight back to {name}. ")
+        voice += (f"Speak everyday spoken {name}. {_accent(lang, gender)}Say the quoted English words with a "
+                  f"clear, natural English accent, then switch straight back to {name}. ")
     context = _user_text(question, part, typed, has_audio, recent).replace(
         "The candidate's spoken answer is attached as audio.",
         "The candidate's spoken answer comes next as audio.")
@@ -701,7 +735,8 @@ def _feedback_events(question, part, lang, examiner_voice, typed='', raw=b'', ra
         clip, ext = speaking_audio.to_opus(raw)
         if not ext:
             mime = raw_mime
-    result = analyse(question, part, lang, typed=typed, audio=clip, audio_mime=mime, recent=recent)
+    result = analyse(question, part, lang, typed=typed, audio=clip, audio_mime=mime, recent=recent,
+                     gender=gender)
     head = {'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'], 'voice_gender': gender,
             'voice': star}
     sent = False
@@ -724,7 +759,8 @@ def _gemini_names():
 def feedback(question: str, part: str, lang: str, examiner_voice: str,
              typed: str = '', audio: bytes = None, audio_mime: str = 'audio/ogg', recent=None) -> dict:
     t0 = time.monotonic()
-    result = analyse(question, part, lang, typed=typed, audio=audio, audio_mime=audio_mime, recent=recent)
+    result = analyse(question, part, lang, typed=typed, audio=audio, audio_mime=audio_mime, recent=recent,
+                     gender=_live_star(examiner_voice)[1])
     t1 = time.monotonic()
     data, mime = voice(result['feedback'], examiner_voice, lang, result['mood'])
     _, gender = _live_star(examiner_voice)
