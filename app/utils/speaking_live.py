@@ -507,6 +507,169 @@ def voice_stream(text: str, examiner_voice: str, lang: str, mood: str = 'sarcast
         yield {'type': 'done', 'engine': 'none'}
 
 
+# ── Realtime examiner: Gemini Live (2026-11-18, "realtime đồng bộ như examiner trên mạng") ─
+# One Live API session per answer: the model HEARS the answer and SPEAKS the feedback
+# itself (native audio), streaming audio + its own transcript. No separate analysis call
+# and no separate TTS call, so the examiner starts talking ~1-2 s after the answer, and the
+# text on screen is exactly what is being said, revealed in step with the voice.
+# If the Live session fails before any audio, the old analyse + TTS path takes over.
+REALTIME = (os.getenv("SPEAKING_LIVE_REALTIME") or "1").strip() not in ("0", "false", "off")
+REALTIME_MODEL = (os.getenv("SPEAKING_LIVE_REALTIME_MODEL") or "gemini-3.8-live").strip()
+REALTIME_FIRST_AUDIO_BUDGET = float(os.getenv("SPEAKING_LIVE_REALTIME_BUDGET", "10"))
+_LIVE_WS = ("wss://generativelanguage.googleapis.com/ws/"
+            "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")
+
+
+class _NoLiveAudio(Exception):
+    """The Live session produced no audio; nothing was sent to the room yet."""
+
+
+def _to_pcm16k(raw: bytes):
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+             "-ac", "1", "-ar", "16000", "-f", "s16le", "pipe:1"],
+            input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    except Exception as e:
+        raise _NoLiveAudio(f"ffmpeg: {e}")
+    if proc.returncode != 0 or not proc.stdout:
+        raise _NoLiveAudio("ffmpeg could not decode the answer")
+    return proc.stdout
+
+
+def _realtime_system(question, part, lang, gender, typed, has_audio, recent):
+    name = LANGS.get(lang, LANGS['en'])[0]
+    base = _SYSTEM.format(lang=name, moods=' | '.join(MOODS), lang_tips=_LANG_TIPS.get(lang, ''))
+    base = base.split("\nMOOD:", 1)[0].rstrip()
+    voice = (f"{_persona(gender)}. You are speaking out loud, live, face to face: a lively, quick, "
+             f"expressive delivery with real emotion, stressing the key words. ")
+    if lang != 'en':
+        voice += (f"Speak everyday spoken {name}; say the quoted English words with a clear, natural "
+                  f"English accent, then switch straight back to {name}. ")
+    context = _user_text(question, part, typed, has_audio, recent).replace(
+        "The candidate's spoken answer is attached as audio.",
+        "The candidate's spoken answer comes next as audio.")
+    return (f"{base}\n\nVOICE\n- {voice}\n- Say ONLY your feedback, out loud, then stop. Never read "
+            f"out JSON, labels or instructions.\n\nTHIS ANSWER\n{context}")
+
+
+def _realtime(question, part, lang, star, gender, typed, pcm, recent):
+    """Yield room events from one Gemini Live session. Raises _NoLiveAudio only before the
+    first event; after that, problems just end the stream."""
+    from websockets.sync.client import connect
+    key = os.getenv("GEMINI_API_KEY")
+    t0 = time.monotonic()
+    try:
+        ws = connect(f"{_LIVE_WS}?key={key}", open_timeout=5, max_size=None)
+    except Exception as e:
+        raise _NoLiveAudio(f"connect: {type(e).__name__}")
+    with ws:
+        try:
+            ws.send(json.dumps({"setup": {
+                "model": f"models/{REALTIME_MODEL}",
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": star}}},
+                },
+                "systemInstruction": {"parts": [{"text": _realtime_system(
+                    question, part, lang, gender, typed, bool(pcm), recent)}]},
+                "outputAudioTranscription": {},
+                # We send the whole answer at once: no voice-activity guessing, the turn
+                # ends exactly at activityEnd.
+                "realtimeInputConfig": {"automaticActivityDetection": {"disabled": True}},
+            }}))
+            hello = json.loads(ws.recv(timeout=8))
+            if 'setupComplete' not in hello:
+                raise _NoLiveAudio(f"setup: {str(hello)[:200]}")
+            if pcm:
+                ws.send(json.dumps({"realtimeInput": {"activityStart": {}}}))
+                step = 32000     # 1 s of 16 kHz s16le
+                for i in range(0, len(pcm), step):
+                    ws.send(json.dumps({"realtimeInput": {"audio": {
+                        "data": base64.b64encode(pcm[i:i + step]).decode(),
+                        "mimeType": "audio/pcm;rate=16000"}}}))
+                ws.send(json.dumps({"realtimeInput": {"activityEnd": {}}}))
+            else:
+                ws.send(json.dumps({"clientContent": {"turns": [{"role": "user", "parts": [
+                    {"text": f'My answer (typed): "{typed}"'}]}], "turnComplete": True}}))
+        except _NoLiveAudio:
+            raise
+        except Exception as e:
+            raise _NoLiveAudio(f"send: {type(e).__name__}: {e}")
+
+        started = False
+        pending, said = [], []
+        deadline = t0 + REALTIME_FIRST_AUDIO_BUDGET
+        while True:
+            try:
+                raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()) if not started else 15)
+            except Exception as e:
+                if not started:
+                    raise _NoLiveAudio(f"recv: {type(e).__name__}")
+                break
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                continue
+            sc = msg.get("serverContent") or {}
+            for p in (sc.get("modelTurn") or {}).get("parts") or []:
+                data = (p.get("inlineData") or {}).get("data")
+                if not data:
+                    continue
+                if not started:
+                    started = True
+                    logger.info("live realtime: first audio after %.1fs", time.monotonic() - t0)
+                    yield {'type': 'start', 'mood': 'sarcastic', 'voice_gender': gender}
+                    for t in pending:
+                        yield {'type': 'say', 'text': t}
+                    pending = []
+                yield {'type': 'pcm', 'data': data, 'rate': STREAM_RATE}
+            tr = (sc.get("outputTranscription") or {}).get("text")
+            if tr:
+                said.append(tr)
+                if started:
+                    yield {'type': 'say', 'text': tr}
+                else:
+                    pending.append(tr)
+            if sc.get("turnComplete") or sc.get("interrupted") or msg.get("goAway"):
+                break
+        if not started:
+            raise _NoLiveAudio("no audio in the reply")
+        text = unicodedata.normalize('NFC', ''.join(said)).strip()
+        logger.info("live realtime: done in %.1fs", time.monotonic() - t0)
+        yield {'type': 'done', 'engine': 'gemini-live', 'feedback': text}
+
+
+def feedback_events(question, part, lang, examiner_voice, typed='', raw=b'', raw_mime='audio/webm',
+                    recent=None):
+    """Events for /feedback/stream. The FIRST event only comes once the voice is ready, so
+    text and voice reach the room together. Raises (before any event) only when even the
+    fallback analysis fails."""
+    star, gender = _live_star(examiner_voice)
+    if REALTIME and os.getenv("GEMINI_API_KEY"):
+        try:
+            pcm = _to_pcm16k(raw) if raw else b''
+            yield from _realtime(question, part, lang, star, gender, typed, pcm, recent)
+            return
+        except _NoLiveAudio as e:
+            logger.warning("live realtime: falling back to analyse + TTS (%s)", e)
+    from app.utils import speaking_audio
+    clip, mime = None, 'audio/ogg'
+    if raw:
+        clip, ext = speaking_audio.to_opus(raw)
+        if not ext:
+            mime = raw_mime
+    result = analyse(question, part, lang, typed=typed, audio=clip, audio_mime=mime, recent=recent)
+    head = {'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'], 'voice_gender': gender}
+    sent = False
+    for item in voice_stream(result['feedback'], examiner_voice, lang, result['mood']):
+        if not sent:
+            yield head          # together with the first audio, never before it
+            sent = True
+        yield item
+
+
 def _gemini_names():
     # Chirp3-HD and Gemini TTS share the same 30 star names.
     return {'Achernar', 'Achird', 'Algenib', 'Algieba', 'Alnilam', 'Aoede', 'Autonoe',

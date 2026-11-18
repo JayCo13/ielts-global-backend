@@ -106,12 +106,13 @@ async def live_feedback_stream(attempt_id: int,
                                audio: Optional[UploadFile] = File(None),
                                current_student: User = Depends(get_current_student),
                                db: Session = Depends(get_db)):
-    """Same as /feedback, but the voice is streamed (2026-11-18, "feedback nhanh hơn").
+    """Same as /feedback, but streamed (2026-11-18).
 
-    Newline-delimited JSON: first {"type":"text",...} as soon as the analysis is done, then
-    {"type":"pcm",...} audio pieces the room plays as they arrive, or one {"type":"full",...}
-    clip when the fallback voice was used, then {"type":"done","engine"}. Errors before the
-    text still come back as normal HTTP errors, exactly like /feedback.
+    Newline-delimited JSON. Normally a Gemini Live session: {"type":"start"}, then "pcm"
+    audio pieces and "say" transcript pieces (what is being spoken) as they come, then
+    {"type":"done","feedback"}. Fallback (Live failed): {"type":"text","feedback"} sent
+    together with the first "pcm" (or one "full" clip), then "done". The first line is only
+    sent once the voice is ready. Errors before it are normal HTTP errors, like /feedback.
     """
     require_speaking_access(current_student)
     attempt = _own_attempt(db, attempt_id, current_student)
@@ -146,17 +147,13 @@ async def live_feedback_stream(attempt_id: int,
         raise HTTPException(status_code=429,
                             detail="You have used today's live examiner feedback. Please come back tomorrow.")
 
-    def analyse():
-        clip, mime = None, 'audio/ogg'
-        if raw:
-            clip, ext = speaking_audio.to_opus(raw)
-            if not ext:
-                mime = (audio.content_type or 'audio/webm').split(';')[0]
-        return speaking_live.analyse(question, part, lang, typed=typed, audio=clip,
-                                     audio_mime=mime, recent=prev)
-
+    raw_mime = (audio.content_type or 'audio/webm').split(';')[0] if audio is not None else 'audio/webm'
+    events = speaking_live.feedback_events(question, part, lang, voice, typed=typed, raw=raw,
+                                           raw_mime=raw_mime, recent=prev)
+    # Wait (off the event loop) for the first event: it only comes when the voice is ready,
+    # and errors up to that point still become a normal HTTP error.
     try:
-        result = await run_in_threadpool(analyse)
+        first = await run_in_threadpool(next, events)
     except Exception as e:
         speaking_live.give_back(current_student.user_id)
         logger.warning("live stream failed (attempt %s, q %s): %s", attempt_id, order_index, e)
@@ -166,15 +163,12 @@ async def live_feedback_stream(attempt_id: int,
         raise HTTPException(status_code=502,
                             detail=f"The examiner could not give feedback this time. ({reason})")
 
-    _, gender = speaking_live._live_star(voice)
-
     def lines():
-        yield json.dumps({'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'],
-                          'voice_gender': gender}) + "\n"
-        for item in speaking_live.voice_stream(result['feedback'], voice, lang, result['mood']):
+        yield json.dumps(first) + "\n"
+        for item in events:
             yield json.dumps(item) + "\n"
 
-    # A sync generator: Starlette runs it in a worker thread, so the blocking queue reads
-    # inside voice_stream never hold the event loop.
+    # A sync generator: Starlette runs it in a worker thread, so the blocking reads inside
+    # never hold the event loop.
     return StreamingResponse(lines(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
