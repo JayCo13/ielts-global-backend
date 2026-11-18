@@ -224,7 +224,7 @@ _VI_DIALECT = {
                   "never switching to a Northern or Central accent"),
         'words': ("- Vietnamese dialect: you are a man from Saigon. Use SOUTHERN spoken words only, e.g. "
                   "\"nè\", \"nha\", \"hông\", \"dzậy\"/\"vậy\", \"hả\", \"trời đất\", \"má ơi\", "
-                  "\"thiệt\", \"cái gì dzậy trời\", \"bộ\". Never use Northern-only words such as "
+                  "\"thiệt\", \"cái gì dzậy trời\", \"bộ\", \"ủa\". Never use Northern-only words such as "
                   "\"thế\", \"nhé\", \"ạ\", \"ơ kìa\", \"chứ lị\".\n"),
     },
     'female': {
@@ -241,6 +241,11 @@ _VI_DIALECT = {
 def _lang_tips(lang: str, gender=None) -> str:
     tips = _LANG_TIPS.get(lang, '')
     if lang == 'vi' and gender in _VI_DIALECT:
+        # The shared list mixes Northern and Southern words; drop those that belong to one
+        # region so they can't pull the examiner into the other accent.
+        for w in ('Má ơi', 'Ơ kìa', 'dữ vậy', 'vậy', 'Đỉnh thật sự', 'nha', 'Nói thật nha', 'Gì kỳ vậy',
+                  'hả trời', 'Xin bạn đó', 'đó', 'Trời đất ơi', 'Ủa', 'Hả, gì cơ?'):
+            tips = tips.replace(f'"{w}", ', '')
         tips += _VI_DIALECT[gender]['words']
     return tips
 
