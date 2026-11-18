@@ -10,6 +10,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -94,3 +95,86 @@ async def live_feedback(attempt_id: int,
             reason += ' ' + str(e).split('HTTP', 1)[1][:4].strip()
         raise HTTPException(status_code=502,
                             detail=f"The examiner could not give feedback this time. ({reason})")
+
+
+@router.post("/speaking/live/attempts/{attempt_id}/feedback/stream")
+async def live_feedback_stream(attempt_id: int,
+                               order_index: int = Form(...),
+                               lang: str = Form('en'),
+                               text: Optional[str] = Form(None),
+                               recent: Optional[str] = Form(None),
+                               audio: Optional[UploadFile] = File(None),
+                               current_student: User = Depends(get_current_student),
+                               db: Session = Depends(get_db)):
+    """Same as /feedback, but the voice is streamed (2026-11-18, "feedback nhanh hơn").
+
+    Newline-delimited JSON: first {"type":"text",...} as soon as the analysis is done, then
+    {"type":"pcm",...} audio pieces the room plays as they arrive, or one {"type":"full",...}
+    clip when the fallback voice was used, then {"type":"done","engine"}. Errors before the
+    text still come back as normal HTTP errors, exactly like /feedback.
+    """
+    require_speaking_access(current_student)
+    attempt = _own_attempt(db, attempt_id, current_student)
+    if attempt.status != 'in_progress':
+        raise HTTPException(status_code=409, detail="This test has already ended.")
+    answer = db.query(SpeakingAttemptAnswer).filter(
+        SpeakingAttemptAnswer.attempt_id == attempt_id,
+        SpeakingAttemptAnswer.order_index == order_index).first()
+    if not answer:
+        raise HTTPException(status_code=404, detail="Question not found in this test.")
+    question = answer.question_text or ''
+    part = answer.part or 'part1'
+    voice = attempt.voice
+    db.close()
+
+    lang = lang if lang in speaking_live.LANGS else 'en'
+    typed = (text or '').strip()[:3000]
+    try:
+        got = json.loads(recent) if recent else []
+        prev = [str(r)[:400] for r in got][-4:] if isinstance(got, list) else []
+    except Exception:
+        prev = []
+    raw = await audio.read() if audio is not None else b''
+    if len(raw) > MAX_RECORDING_BYTES:
+        raise HTTPException(status_code=413, detail="The recording is too large.")
+    if not raw and not typed:
+        raise HTTPException(status_code=400, detail="There is no answer to give feedback on.")
+
+    try:
+        speaking_live.take_quota(current_student.user_id)
+    except speaking_live.LiveLimit:
+        raise HTTPException(status_code=429,
+                            detail="You have used today's live examiner feedback. Please come back tomorrow.")
+
+    def analyse():
+        clip, mime = None, 'audio/ogg'
+        if raw:
+            clip, ext = speaking_audio.to_opus(raw)
+            if not ext:
+                mime = (audio.content_type or 'audio/webm').split(';')[0]
+        return speaking_live.analyse(question, part, lang, typed=typed, audio=clip,
+                                     audio_mime=mime, recent=prev)
+
+    try:
+        result = await run_in_threadpool(analyse)
+    except Exception as e:
+        speaking_live.give_back(current_student.user_id)
+        logger.warning("live stream failed (attempt %s, q %s): %s", attempt_id, order_index, e)
+        reason = type(e).__name__
+        if 'HTTP' in str(e):
+            reason += ' ' + str(e).split('HTTP', 1)[1][:4].strip()
+        raise HTTPException(status_code=502,
+                            detail=f"The examiner could not give feedback this time. ({reason})")
+
+    _, gender = speaking_live._live_star(voice)
+
+    def lines():
+        yield json.dumps({'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'],
+                          'voice_gender': gender}) + "\n"
+        for item in speaking_live.voice_stream(result['feedback'], voice, lang, result['mood']):
+            yield json.dumps(item) + "\n"
+
+    # A sync generator: Starlette runs it in a worker thread, so the blocking queue reads
+    # inside voice_stream never hold the event loop.
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

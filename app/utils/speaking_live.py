@@ -21,6 +21,8 @@ Env:
   SPEAKING_LIVE_DAILY_LIMIT  feedbacks per user per day, per worker (default 150)
 """
 import base64
+import json
+import queue
 import random
 import logging
 import os
@@ -328,6 +330,11 @@ _MOOD_STYLE = {
 def _gemini_voice(text: str, star: str, mood: str, lang: str):
     """Gemini TTS takes a director's note before the text; it is not read out."""
     from app.utils import speaking_tts as T
+    pcm = T._pcm(_gemini_prompt(text, star, mood, lang), star)
+    return T._to_opus(pcm), 'audio/ogg'
+
+
+def _gemini_prompt(text: str, star: str, mood: str, lang: str) -> str:
     persona = _persona('female' if star in _FEMALE_STARS else 'male')
     tone = _MOOD_STYLE.get(mood, _MOOD_STYLE['sarcastic'])
     name = LANGS.get(lang, LANGS['en'])[0]
@@ -344,8 +351,7 @@ def _gemini_voice(text: str, star: str, mood: str, lang: str):
     # ONE call for the whole text. Splitting it in two halves was faster but broke the
     # intonation at the join and used two requests of the Gemini TTS daily quota per
     # feedback, so the quota ran out and everything fell back to Chirp (2026-11-17).
-    pcm = T._pcm(f"{note}:\n\n{text}", star)
-    return T._to_opus(pcm), 'audio/ogg'
+    return f"{note}:\n\n{text}"
 
 
 def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
@@ -394,6 +400,111 @@ def voice(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
         return c.result(timeout=10) or (None, None)
     except Exception:
         return None, None
+
+
+# ── Streaming voice (2026-11-18, "feedback nhanh hơn") ────────────────────────────────
+# The examiner starts talking as soon as Gemini has produced the first piece of audio,
+# instead of after the whole clip is synthesised, encoded and sent in one go. Same single
+# request, same voice and note as voice(); only the delivery changes.
+STREAM_FIRST_AUDIO_BUDGET = float(os.getenv("SPEAKING_LIVE_STREAM_BUDGET", "8"))
+STREAM_RATE = 24000     # Gemini TTS PCM: s16le mono 24 kHz
+
+
+def _gemini_stream(prompt: str, star: str, out: "queue.Queue"):
+    """Push ('pcm', base64) items, then ('end', None) or ('error', exc). Runs in a thread."""
+    import requests
+    from app.utils import speaking_tts as T
+    try:
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": star}}},
+            },
+        }
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{T._MODEL}:streamGenerateContent"
+        with requests.post(url, params={"key": T._api_key(), "alt": "sse"}, json=body,
+                           stream=True, timeout=(4, 60)) as res:
+            if res.status_code == 429:
+                raise T.TtsQuota("Gemini TTS quota exhausted")
+            if res.status_code != 200:
+                raise T.TtsError(f"Gemini TTS stream returned {res.status_code}: {res.text[:200]}")
+            for line in res.iter_lines():
+                if not line or not line.startswith(b"data:"):
+                    continue
+                obj = json.loads(line[5:])
+                for cand in obj.get("candidates") or []:
+                    for part in (cand.get("content") or {}).get("parts") or []:
+                        data = (part.get("inlineData") or {}).get("data")
+                        if data:
+                            out.put(('pcm', data))
+        out.put(('end', None))
+    except Exception as e:
+        out.put(('error', e))
+
+
+def voice_stream(text: str, examiner_voice: str, lang: str, mood: str = 'sarcastic'):
+    """Yield dicts for the room: {'type':'pcm','data':b64,'rate'} … then one of
+    {'type':'full','audio','audio_mime'} (Chirp fallback, whole clip) and finally
+    {'type':'done','engine'}. Never raises."""
+    from app.utils import google_tts
+    t0 = time.monotonic()
+    star, _ = _live_star(examiner_voice)
+    _, en_locale = _examiner_star_and_lang(examiner_voice)
+    locale = en_locale if lang == 'en' else LANGS.get(lang, (None, None))[1]
+
+    def chirp():
+        if not (text and locale and google_tts.is_configured()):
+            return None
+        try:
+            return _google_voice(text, star, locale)
+        except Exception as e:
+            logger.warning("live stream: Chirp3-HD (%s) failed: %s", locale, e)
+            return None
+
+    got = 0
+    if text and os.getenv("GEMINI_API_KEY"):
+        q = queue.Queue()
+        _pool.submit(_gemini_stream, _gemini_prompt(text, star, mood, lang), star, q)
+        # Chirp is made in parallel only as insurance; it is used only when Gemini has not
+        # produced any audio within the budget.
+        c = _pool.submit(chirp)
+        deadline = t0 + STREAM_FIRST_AUDIO_BUDGET
+        while True:
+            try:
+                wait = max(0.05, deadline - time.monotonic()) if not got else 30
+                kind, val = q.get(timeout=wait)
+            except queue.Empty:
+                if not got:
+                    logger.warning("live stream: no Gemini audio after %ss, using Chirp3-HD",
+                                   STREAM_FIRST_AUDIO_BUDGET)
+                break
+            if kind == 'pcm':
+                if not got:
+                    logger.info("live stream: first audio after %.1fs", time.monotonic() - t0)
+                got += 1
+                yield {'type': 'pcm', 'data': val, 'rate': STREAM_RATE}
+            elif kind == 'error':
+                logger.warning("live stream: Gemini TTS failed (%s): %s", type(val).__name__, val)
+                break
+            else:
+                break
+        if got:
+            logger.info("live stream: done in %.1fs, %d chunks", time.monotonic() - t0, got)
+            yield {'type': 'done', 'engine': 'gemini-stream'}
+            return
+        try:
+            out = c.result(timeout=10)
+        except Exception:
+            out = None
+    else:
+        out = chirp()
+    if out:
+        data, mime = out
+        yield {'type': 'full', 'audio': base64.b64encode(data).decode(), 'audio_mime': mime}
+        yield {'type': 'done', 'engine': 'google-chirp'}
+    else:
+        yield {'type': 'done', 'engine': 'none'}
 
 
 def _gemini_names():
