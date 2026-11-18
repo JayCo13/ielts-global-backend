@@ -622,8 +622,10 @@ def _realtime(question, part, lang, star, gender, typed, pcm, recent):
                 if not started:
                     started = True
                     # warning level: the server runs with --log-level warning.
-                    logger.warning("live realtime: first audio after %.1fs", time.monotonic() - t0)
-                    yield {'type': 'start', 'mood': 'sarcastic', 'voice_gender': gender}
+                    logger.warning("live realtime: first audio after %.1fs (voice %s, %s)", time.monotonic() - t0,
+                                   star, REALTIME_MODEL)
+                    yield {'type': 'start', 'mood': 'sarcastic', 'voice_gender': gender, 'voice': star,
+                           'engine': f'gemini-live ({REALTIME_MODEL})'}
                     for t in pending:
                         yield {'type': 'say', 'text': t}
                     pending = []
@@ -700,7 +702,8 @@ def _feedback_events(question, part, lang, examiner_voice, typed='', raw=b'', ra
         if not ext:
             mime = raw_mime
     result = analyse(question, part, lang, typed=typed, audio=clip, audio_mime=mime, recent=recent)
-    head = {'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'], 'voice_gender': gender}
+    head = {'type': 'text', 'feedback': result['feedback'], 'mood': result['mood'], 'voice_gender': gender,
+            'voice': star}
     sent = False
     for item in voice_stream(result['feedback'], examiner_voice, lang, result['mood']):
         if not sent:
