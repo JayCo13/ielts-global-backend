@@ -561,7 +561,7 @@ def _realtime(question, part, lang, star, gender, typed, pcm, recent):
     key = os.getenv("GEMINI_API_KEY")
     t0 = time.monotonic()
     try:
-        ws = connect(f"{_LIVE_WS}?key={key}", open_timeout=5, max_size=None)
+        ws = connect(f"{_LIVE_WS}?key={key}", open_timeout=5, close_timeout=1, max_size=None)
     except Exception as e:
         raise _NoLiveAudio(f"connect: {type(e).__name__}")
     with ws:
@@ -603,7 +603,9 @@ def _realtime(question, part, lang, star, gender, typed, pcm, recent):
         deadline = t0 + REALTIME_FIRST_AUDIO_BUDGET
         while True:
             try:
-                raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()) if not started else 15)
+                # After the voice has started, 5 s of silence means the turn is over even if
+                # turnComplete never arrives — don't hold the room's stream open.
+                raw = ws.recv(timeout=max(0.1, deadline - time.monotonic()) if not started else 5)
             except Exception as e:
                 if not started:
                     raise _NoLiveAudio(f"recv: {type(e).__name__}")
@@ -619,7 +621,8 @@ def _realtime(question, part, lang, star, gender, typed, pcm, recent):
                     continue
                 if not started:
                     started = True
-                    logger.info("live realtime: first audio after %.1fs", time.monotonic() - t0)
+                    # warning level: the server runs with --log-level warning.
+                    logger.warning("live realtime: first audio after %.1fs", time.monotonic() - t0)
                     yield {'type': 'start', 'mood': 'sarcastic', 'voice_gender': gender}
                     for t in pending:
                         yield {'type': 'say', 'text': t}
@@ -637,12 +640,48 @@ def _realtime(question, part, lang, star, gender, typed, pcm, recent):
         if not started:
             raise _NoLiveAudio("no audio in the reply")
         text = unicodedata.normalize('NFC', ''.join(said)).strip()
-        logger.info("live realtime: done in %.1fs", time.monotonic() - t0)
+        logger.warning("live realtime: done in %.1fs", time.monotonic() - t0)
         yield {'type': 'done', 'engine': 'gemini-live', 'feedback': text}
 
 
 def feedback_events(question, part, lang, examiner_voice, typed='', raw=b'', raw_mime='audio/webm',
                     recent=None):
+    """Events for /feedback/stream, produced in a background thread.
+
+    The work (Live websocket, ffmpeg, Gemini calls) never runs inside this generator itself:
+    when the room stops listening, Starlette drops the generator and Python may close it on
+    the EVENT LOOP thread — closing a websocket there blocked the whole server for seconds
+    (2026-11-18: 2nd answer failed, /subscription/status timed out). Here closing only sets
+    a flag; the worker thread finishes and cleans up on its own."""
+    q = queue.Queue()
+    stop = threading.Event()
+
+    def run():
+        try:
+            for ev in _feedback_events(question, part, lang, examiner_voice, typed, raw, raw_mime, recent):
+                if stop.is_set():
+                    break
+                q.put(('ev', ev))
+            q.put(('end', None))
+        except BaseException as e:      # handed to the consumer, which raises it
+            q.put(('err', e))
+
+    threading.Thread(target=run, name="live-feedback", daemon=True).start()
+    try:
+        while True:
+            kind, val = q.get(timeout=90)
+            if kind == 'ev':
+                yield val
+            elif kind == 'err':
+                raise val
+            else:
+                return
+    finally:
+        stop.set()
+
+
+def _feedback_events(question, part, lang, examiner_voice, typed='', raw=b'', raw_mime='audio/webm',
+                     recent=None):
     """Events for /feedback/stream. The FIRST event only comes once the voice is ready, so
     text and voice reach the room together. Raises (before any event) only when even the
     fallback analysis fails."""
