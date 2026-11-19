@@ -8,6 +8,8 @@ request, and the heavy column is read only for tasks that are new or were edited
 """
 import html
 import re
+import threading
+import time
 from typing import Dict, Iterable
 
 from sqlalchemy import func
@@ -16,6 +18,12 @@ from app.models.models import WritingTask
 
 MAX_LEN = 120
 _cache: Dict[int, tuple] = {}          # task_id -> (instructions length, title)
+# The length check itself scans every LONGTEXT (base64 images) on TiDB, which made the
+# Writing lists slow (2026-11-19). Known tasks are trusted for CHECK_EVERY seconds;
+# only tasks never seen before are read in between. Admin edits show within that window.
+CHECK_EVERY = 300
+_checked_at: Dict[int, float] = {}    # task_id -> when its length was last checked
+_lock = threading.Lock()
 
 # A title the admin typed is kept only if it says more than "Task 1" / "Part 2".
 _GENERIC = re.compile(r"^\s*(writing\s*)?(task|part)?\s*\d*\s*$", re.I)
@@ -62,12 +70,19 @@ def part_titles(db, tasks: Iterable) -> Dict[int, str]:
     ids = [t.task_id for t in tasks]
     if not ids:
         return {}
-    lengths = dict(db.query(WritingTask.task_id, func.coalesce(func.length(WritingTask.instructions), 0))
-                   .filter(WritingTask.task_id.in_(ids)).all())
-    stale = [i for i in ids if _cache.get(i, (None,))[0] != lengths.get(i, 0)]
-    if stale:
-        for tid, ins in db.query(WritingTask.task_id, WritingTask.instructions).filter(WritingTask.task_id.in_(stale)).all():
-            _cache[tid] = (lengths.get(tid, 0), title_from_instructions(ins or ""))
+    now = time.monotonic()
+    check = [i for i in ids if i not in _cache or now - _checked_at.get(i, 0.0) >= CHECK_EVERY]
+    if check:
+        with _lock:
+            lengths = dict(db.query(WritingTask.task_id, func.coalesce(func.length(WritingTask.instructions), 0))
+                           .filter(WritingTask.task_id.in_(check)).all())
+            stale = [i for i in check if _cache.get(i, (None,))[0] != lengths.get(i, 0)]
+            if stale:
+                for tid, ins in db.query(WritingTask.task_id, WritingTask.instructions).filter(WritingTask.task_id.in_(stale)).all():
+                    _cache[tid] = (lengths.get(tid, 0), title_from_instructions(ins or ""))
+            for i in check:
+                _cache.setdefault(i, (lengths.get(i, 0), ""))
+                _checked_at[i] = now
     out = {}
     for t in tasks:
         own = (t.title or "").strip()

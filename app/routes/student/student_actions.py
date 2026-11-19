@@ -2170,7 +2170,7 @@ async def get_listening_part_descriptions(
     
     
 @router.get("/writing/tasks", response_model=List[dict])
-async def get_writing_tasks(
+def get_writing_tasks(  # sync: runs in the threadpool, DB work never blocks the event loop (2026-11-19)
     current_student = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
