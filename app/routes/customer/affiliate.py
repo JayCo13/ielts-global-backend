@@ -25,6 +25,9 @@ from app.utils.upload_security import validate_image_bytes
 from app.routes.customer.creator_hub import affiliate_gate  # Creator Hub access (2026-11)
 from app.utils.creator_hub import referral_allowed
 from app.utils.datetime_utils import get_vietnam_time
+from app.utils.affiliate_discount import (
+    checkout_offer, validate_code, discount_enabled_for, DiscountCodeError, DISCOUNT_PCT,
+)
 
 router = APIRouter()
 
@@ -108,7 +111,33 @@ async def get_affiliate(db: Session = Depends(get_db), current: User = Depends(g
         # This account's current rate (per-account override or the default), as a fraction.
         "commission_rate": rate_pct_at(db, current.user_id) / 100.0,
         "rate_pct": rate_pct_at(db, current.user_id),
+        # Discount code = the referral code; buyers get discount_pct off their first
+        # VIP order only while the admin has turned this creator's discount ON.
+        "discount_code": current.referral_code,
+        "discount_enabled": discount_enabled_for(db, current.user_id),
+        "discount_pct": DISCOUNT_PCT,
     }
+
+
+# ── Affiliate discount on the first VIP order (Payment page, 2026-11-14) ─────
+
+@router.get("/checkout-offer")
+async def get_checkout_offer(db: Session = Depends(get_db), current: User = Depends(get_current_student)):
+    """Discount already earned through an affiliate link, or whether to show the code box."""
+    return checkout_offer(db, current)
+
+
+class CodeIn(BaseModel):
+    code: str = Field(..., max_length=32)
+
+
+@router.post("/validate-code")
+async def validate_discount_code(payload: CodeIn, db: Session = Depends(get_db),
+                                 current: User = Depends(get_current_student)):
+    try:
+        return validate_code(db, current, payload.code)
+    except DiscountCodeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 class TrackClick(BaseModel):

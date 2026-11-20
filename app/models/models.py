@@ -1519,6 +1519,10 @@ class CreatorProfile(Base):
     email = Column(String(255), nullable=True)
     country_code = Column(String(8), nullable=True)
     enabled_at = Column(DateTime, nullable=True)
+    # Admin "Discount Permission" (2026-11): ON = buyers referred by this creator (link
+    # or code) get AFFILIATE_DISCOUNT_PCT off their first VIP order. Independent of
+    # hub_access / commission; default OFF.
+    discount_enabled = Column(Boolean, nullable=False, default=False, server_default='0')
     created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
     updated_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
 
@@ -1593,6 +1597,11 @@ class CreatorReconciliation(Base):
     submitted_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None), index=True)
     reviewed_at = Column(DateTime, nullable=True)
     reviewed_by = Column(Integer, nullable=True)
+    # Bonus policy (2026-11-19, see app/utils/creator_bonus.py). NULL on older rows.
+    views_reward_raw_usd = Column(Float, nullable=True)   # views x rate, before the monthly cap
+    views_reward_usd = Column(Float, nullable=True)       # after the monthly cap
+    tier_bonus_usd = Column(Float, nullable=True)         # sum of the per-channel tier bonuses
+    video_reward_usd = Column(Float, nullable=True)       # $ per approved video (snapshot)
 
 
 class CreatorReconciliationItem(Base):
@@ -1612,6 +1621,28 @@ class CreatorReconciliationItem(Base):
     # 2026-11 feedback: optional proof (screenshots / screen recordings of total views),
     # JSON list of public R2 URLs uploaded via POST /creator-hub/proofs.
     proof_urls = Column(Text, nullable=True)
+    # Monthly Total Views Bonus per Channel (2026-11-19): this channel's views in the
+    # submission month (incl. this period) and the tier bonus granted on this line.
+    tier_views = Column(BigInteger, nullable=True)
+    tier_bonus_usd = Column(Float, nullable=True)
+
+
+class CreatorVideoLink(Base):
+    """Individual Video Bonus (2026-11-19): one video link sent with a views submission.
+    url_key is unique across ALL creators and periods, so a video can only ever be
+    submitted once; it is released (set NULL) only if the whole submission is rejected."""
+    __tablename__ = 'creator_video_links'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False, index=True)
+    reconciliation_id = Column(Integer, ForeignKey('creator_reconciliations.id', ondelete='CASCADE'),
+                               nullable=False, index=True)
+    url = Column(String(500), nullable=False)
+    url_key = Column(String(500), nullable=True, unique=True)
+    status = Column(String(20), nullable=False, default='pending', index=True)  # pending / approved / rejected / returned
+    reward_usd = Column(Float, nullable=False, default=0)    # snapshot of the per-video reward
+    created_at = Column(DateTime, default=lambda: get_vietnam_time().replace(tzinfo=None))
+    reviewed_at = Column(DateTime, nullable=True)
 
 
 class CheckoutIntent(Base):

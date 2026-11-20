@@ -4,15 +4,24 @@ from app.database import get_db
 from app.models.models import VIPPackage, VIPSubscription, User, PackageTransaction
 from app.routes.admin.auth import get_current_student
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 import os
 from app.utils.datetime_utils import get_vietnam_time
 from app.utils.currency import vnd_to_usd, USD_VND_RATE
 from app.utils.vip_access import ALL_SKILLS_COVERS, package_covers
+from app.utils.affiliate_discount import discount_for_checkout, apply_pct, DiscountCodeError
 import logging
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _affiliate_pct(db, user, code) -> float:
+    """Affiliate discount (%) for this checkout — first VIP order only (2026-11-14)."""
+    try:
+        return discount_for_checkout(db, user, code)
+    except DiscountCodeError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 class PackageResponse(BaseModel):
     package_id: int
@@ -146,6 +155,7 @@ async def get_subscription_status(
 @router.post("/packages/{package_id}/create-checkout", response_model=dict)
 async def create_checkout(
     package_id: int,
+    code: Optional[str] = None,
     current_user: User = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
@@ -185,6 +195,11 @@ async def create_checkout(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This package is not configured for payment yet. Please contact support."
         )
+
+    # Affiliate discount on the first VIP order; the webhook checks price_cents below
+    discount_pct = _affiliate_pct(db, current_user, code)
+    if discount_pct:
+        price_usd = round(int(round(apply_pct(price_usd * 100, discount_pct))) / 100.0, 2)
     
     # Rate limiting: max 20 payment requests per user per 5 minutes
     five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
@@ -229,6 +244,7 @@ async def create_checkout(
             "package_name": package.name,
             "price": float(package.price),
             "price_usd": price_usd,
+            "discount_pct": discount_pct,
         }
     except Exception as e:
         logger.error(f"Lemon Squeezy checkout creation failed: {e}", exc_info=True)
@@ -242,6 +258,7 @@ async def create_checkout(
 async def purchase_package(
     package_id: int,
     request: Request,
+    code: Optional[str] = None,
     current_user: User = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
@@ -262,6 +279,10 @@ async def purchase_package(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Package not found or not available"
         )
+
+    # Affiliate discount on the first VIP order (VND amount charged by PayOS)
+    discount_pct = _affiliate_pct(db, current_user, code)
+    charge_vnd = int(round(apply_pct(package.price, discount_pct)))
 
     # Rate limiting: max 20 payment requests per user per 5 minutes
     five_min_ago = get_vietnam_time().replace(tzinfo=None) - timedelta(minutes=5)
@@ -344,7 +365,7 @@ async def purchase_package(
         user_id=current_user.user_id,
         package_id=package_id,
         subscription_id=subscription.subscription_id,
-        amount=package.price,
+        amount=charge_vnd,
         payment_method="payos",
         status="pending",
         payos_order_code=order_code,
@@ -365,7 +386,7 @@ async def purchase_package(
 
         payos_response = create_payment_link(
             order_code=order_code,
-            amount=int(package.price),
+            amount=charge_vnd,
             description=description,
             return_url=return_url,
             cancel_url=cancel_url,
@@ -399,6 +420,7 @@ async def purchase_package(
 async def create_ninepay_checkout(
     package_id: int,
     method: str = "CREDIT_CARD",
+    code: Optional[str] = None,
     current_user: User = Depends(get_current_student),
     db: Session = Depends(get_db)
 ):
@@ -434,9 +456,13 @@ async def create_ninepay_checkout(
             detail="Unsupported payment method."
         )
 
+    # Affiliate discount on the first VIP order (VND amount charged by 9Pay)
+    discount_pct = _affiliate_pct(db, current_user, code)
+    charge_vnd = int(round(apply_pct(package.price, discount_pct)))
+
     # 9Pay per-transaction VND limits depend on the method
     min_vnd, max_vnd = ninepay_service.METHOD_LIMITS[method]
-    if not (min_vnd <= int(package.price) <= max_vnd):
+    if not (min_vnd <= charge_vnd <= max_vnd):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This package cannot be paid with 9Pay."
@@ -520,7 +546,7 @@ async def create_ninepay_checkout(
         user_id=current_user.user_id,
         package_id=package_id,
         subscription_id=subscription.subscription_id,
-        amount=package.price,
+        amount=charge_vnd,
         payment_method="9pay",
         status="pending",
         transaction_code=invoice_no,
@@ -538,7 +564,7 @@ async def create_ninepay_checkout(
 
         checkout_url = ninepay_service.create_payment_url(
             invoice_no=invoice_no,
-            amount=int(package.price),
+            amount=charge_vnd,
             description=description,
             return_url=return_url,
             back_url=f"{frontend_url}/vip-packages",
@@ -550,7 +576,8 @@ async def create_ninepay_checkout(
             "transaction_id": transaction.transaction_id,
             "invoice_no": invoice_no,
             "checkoutUrl": checkout_url,
-            "amount_vnd": int(package.price),
+            "amount_vnd": charge_vnd,
+            "discount_pct": discount_pct,
             "status": "pending"
         }
     except Exception as e:

@@ -9,6 +9,7 @@ PUT  /creator-hub/channels/primary       choose the primary channel for the curr
 GET  /creator-hub/reconciliations        my submissions (with per-channel lines)
 POST /creator-hub/reconciliations        submit views for approved channels (>= SUBMIT_MIN_DAYS apart)
 POST /creator-hub/proofs                 upload a proof of views (image / short video) -> URL
+POST /creator-hub/videos/check           which video links were already submitted (Individual Video Bonus)
 GET  /creator-hub/earnings               creator earnings summary (wallet is the affiliate wallet)
 GET  /creator-hub/leaderboard            Creator Leaderboard (lifetime | monthly)
 
@@ -24,12 +25,13 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.models import (
     User, CreatorApplication, CreatorChannel, CreatorReconciliation, CreatorReconciliationItem,
-    AffiliateWalletTx, CreatorChannelLog,
+    AffiliateWalletTx, CreatorChannelLog, CreatorVideoLink,
 )
 from app.routes.admin.auth import get_current_student
 from app.routes.customer.creator_program import _EMAIL_RE, _PHONE_RE
@@ -39,6 +41,7 @@ from app.utils.creator_hub import (
     now, app_status_label, get_profile, has_hub_access, latest_application, set_hub_access,
     normalize_channel_url, detect_platform, reward_usd, next_submit_at, platform_label,
 )
+from app.utils import creator_bonus
 from app.utils.creator_leaderboard import abbreviate_name, build_leaderboard, available_months
 
 router = APIRouter(prefix="/creator-hub")
@@ -206,6 +209,8 @@ async def list_channels(db: Session = Depends(get_db), current: User = Depends(r
                                  "estimated_usd": open_r.estimated_usd} if open_r else None),
         "min_days_between": SUBMIT_MIN_DAYS,
         "next_submit_at": _iso(next_submit_at(db, current.user_id)),
+        # Eligibility only; bonus tiers / amounts are not shown to creators (policy 2026-11-19).
+        "video_min_views": creator_bonus.get_config(db)["video_min_views"],
     }
 
 
@@ -327,8 +332,9 @@ async def set_primary(payload: PrimaryIn, db: Session = Depends(get_db), current
 
 # ── Reconciliations ──────────────────────────────────────────────────────────
 
-def _recon_dict(r: CreatorReconciliation, items, channels):
+def _recon_dict(r: CreatorReconciliation, items, channels, videos=()):
     return {
+        "videos": [{"url": v.url, "status": v.status} for v in videos],
         "id": r.id, "status": r.status, "estimated_usd": r.estimated_usd,
         "approved_units": int(r.approved_units) if r.approved_units is not None else None,
         "reject_reason": r.reject_reason, "submitted_at": _iso(r.submitted_at), "reviewed_at": _iso(r.reviewed_at),
@@ -355,7 +361,8 @@ async def list_reconciliations(db: Session = Depends(get_db), current: User = De
                 CreatorReconciliationItem.reconciliation_id.in_(ids)).all():
             items.setdefault(it.reconciliation_id, []).append(it)
     channels = {c.id: c for c in db.query(CreatorChannel).filter(CreatorChannel.user_id == current.user_id).all()}
-    return [_recon_dict(r, items.get(r.id, []), channels) for r in rs]
+    videos = creator_bonus.video_rows(db, ids)
+    return [_recon_dict(r, items.get(r.id, []), channels, videos.get(r.id, [])) for r in rs]
 
 
 class ReconItemIn(BaseModel):
@@ -427,13 +434,42 @@ async def upload_proof(file: UploadFile = File(...), current: User = Depends(req
 
 class ReconIn(BaseModel):
     primary_channel_id: Optional[int] = None
-    items: List[ReconItemIn]
+    items: List[ReconItemIn] = Field(default_factory=list)
+    # Individual Video Bonus: links of videos that reached the minimum views this month.
+    videos: List[str] = Field(default_factory=list)
+
+
+class VideoCheckIn(BaseModel):
+    urls: List[str] = Field(default_factory=list)
+
+
+@router.post("/videos/check")
+async def check_videos(payload: VideoCheckIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+    """Links that can't be used: already submitted (any period, any status) or repeated
+    in this list. Lets the form flag them before submitting."""
+    seen, keyed = set(), []
+    for u in payload.urls[:creator_bonus.MAX_VIDEOS_PER_SUBMISSION]:
+        if (u or "").strip():
+            keyed.append((u, creator_bonus.video_key(u)))
+    taken = creator_bonus.taken_keys(db, [k for _u, k in keyed])
+    dup = []
+    for u, k in keyed:
+        if k in taken or k in seen:
+            dup.append(u)
+        seen.add(k)
+    return {"duplicates": dup}
 
 
 @router.post("/reconciliations")
 async def submit_reconciliation(payload: ReconIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
-    if not payload.items:
+    if not payload.items and not any((u or "").strip() for u in payload.videos):
         raise HTTPException(status_code=400, detail="Enter the total views of at least one channel.")
+    try:
+        video_links = creator_bonus.clean_video_urls(payload.videos)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if creator_bonus.taken_keys(db, [k for _u, k in video_links]):
+        raise HTTPException(status_code=400, detail="This video has already been submitted.")
     if _open_recon(db, current.user_id):
         raise HTTPException(status_code=400, detail="Your previous submission is still being reviewed.")
     nxt = next_submit_at(db, current.user_id)
@@ -449,6 +485,8 @@ async def submit_reconciliation(payload: ReconIn, db: Session = Depends(get_db),
     # Primary channel: the only approved one, or the creator's choice among approved ones.
     if len(approved) == 1:
         primary_id = approved[0].id
+    elif not payload.items:            # videos only: no channel line, no primary to choose
+        primary_id = None
     else:
         primary_id = payload.primary_channel_id or next((c.id for c in approved if c.is_primary), None)
         if primary_id not in {c.id for c in approved}:
@@ -480,20 +518,37 @@ async def submit_reconciliation(payload: ReconIn, db: Session = Depends(get_db),
         lines.append((c, ctype, prev, it.total_views, period, it.views_date or today, usd, proofs))
 
     ts = now()
-    r = CreatorReconciliation(user_id=current.user_id, status="submitted", estimated_usd=round(total_usd, 2),
-                              submitted_at=ts)
+    # Bonus policy 2026-11-19: monthly cap on the views reward, per-channel tier bonus and
+    # the per-video reward, all with the settings in force now (stored on the rows).
+    cfg = creator_bonus.get_config(db)
+    priced = [{"channel_id": c.id, "period_views": period, "views_usd": usd}
+              for c, _t, _p, _tot, period, _d, usd, _pr in lines]
+    totals = creator_bonus.price_submission(db, current.user_id, ts, priced, len(video_links), cfg)
+    r = CreatorReconciliation(user_id=current.user_id, status="submitted", estimated_usd=totals["estimated_usd"],
+                              submitted_at=ts, views_reward_raw_usd=totals["views_reward_raw_usd"],
+                              views_reward_usd=totals["views_reward_usd"], tier_bonus_usd=totals["tier_bonus_usd"],
+                              video_reward_usd=totals["video_reward_usd"])
     db.add(r)
     db.flush()
-    for c, ctype, prev, total, period, vdate, usd, proofs in lines:
+    for (c, ctype, prev, total, period, vdate, usd, proofs), pl in zip(lines, priced):
         db.add(CreatorReconciliationItem(
             reconciliation_id=r.id, channel_id=c.id, channel_type=ctype, previous_total=prev,
             submitted_total=total, period_views=period, views_date=vdate,
             rate_per_k=PRIMARY_RATE_PER_K if ctype == "primary" else SECONDARY_RATE_PER_K, estimated_usd=usd,
-            proof_urls=json.dumps(proofs) if proofs else None))
+            proof_urls=json.dumps(proofs) if proofs else None,
+            tier_views=pl["tier_views"], tier_bonus_usd=pl["tier_bonus"]))
         c.last_submitted_total, c.last_submitted_at = total, ts
-    for c in channels.values():   # remember the choice for next period
-        c.is_primary = (c.id == primary_id)
-    db.commit()
+    for url, key in video_links:
+        db.add(CreatorVideoLink(user_id=current.user_id, reconciliation_id=r.id, url=url, url_key=key,
+                                status="pending", reward_usd=totals["video_reward_usd"], created_at=ts))
+    if lines:
+        for c in channels.values():   # remember the choice for next period
+            c.is_primary = (c.id == primary_id)
+    try:
+        db.commit()
+    except IntegrityError:            # the same video sent at the same moment by someone else
+        db.rollback()
+        raise HTTPException(status_code=400, detail="This video has already been submitted.")
     return {"ok": True, "id": r.id, "estimated_usd": r.estimated_usd}
 
 

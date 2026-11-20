@@ -7,10 +7,11 @@ Channels       GET channels, POST channels/{id}/status, GET channels/{id}/logs
 Reconciliation GET reconciliations, POST reconciliations/{id}/review | approve | reject
 Earnings       GET earnings, GET earnings/transactions
 Leaderboard    GET leaderboard (lifetime | monthly)
+Bonus settings GET / PUT bonus-settings (tiers, per-video reward, monthly cap — 2026-11-19)
 
 Admin-facing messages are Vietnamese (admin UI convention).
 """
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -21,7 +22,9 @@ from app.database import get_db
 from app.models.models import (
     User, CreatorApplication, CreatorProfile, CreatorAccessLog, CreatorChannel, CreatorChannelLog,
     CreatorReconciliation, CreatorReconciliationItem, AffiliateWalletTx, AffiliateWithdrawal,
+    CreatorVideoLink,
 )
+from app.utils import creator_bonus
 from app.routes.admin.auth import get_current_admin
 from app.utils.affiliate import AFFILIATE_CURRENCY, UNIT_DIVISOR, format_amount
 from app.utils import creator_hub_email as hub_mail
@@ -166,8 +169,32 @@ async def list_access(q: Optional[str] = Query(None), only: Optional[str] = Quer
             "access_source": p.access_source if p else None,
             "registration_complete": bool(p and p.full_name and p.phone),
             "enabled_at": _iso(p.enabled_at) if p else None,
+            "discount_enabled": bool(p and p.discount_enabled),
         })
     return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+class DiscountIn(BaseModel):
+    enabled: bool
+
+
+@router.post("/access/{user_id}/discount")
+async def set_discount_permission(user_id: int, payload: DiscountIn, db: Session = Depends(get_db),
+                                  admin: User = Depends(get_current_admin)):
+    """Discount Permission (2026-11-14): ON = buyers referred by this creator get 5% off
+    their first VIP order. Independent of Creator Hub access / commission."""
+    u = db.query(User).filter(User.user_id == user_id).first()
+    if not u:
+        raise HTTPException(status_code=404, detail="Không tìm thấy tài khoản.")
+    p = get_profile(db, user_id)
+    if not p:
+        ts = now()
+        p = CreatorProfile(user_id=user_id, hub_access=False, created_at=ts, updated_at=ts, email=u.email)
+        db.add(p)
+    p.discount_enabled = bool(payload.enabled)
+    p.updated_at = now()
+    db.commit()
+    return {"ok": True, "discount_enabled": p.discount_enabled}
 
 
 class AccessIn(BaseModel):
@@ -276,6 +303,7 @@ def _recon_rows(db, rs):
     chans = {c.id: c for c in db.query(CreatorChannel).filter(CreatorChannel.id.in_(ch_ids)).all()} if ch_ids else {}
     uids = {r.user_id for r in rs}
     users = {u.user_id: u for u in db.query(User).filter(User.user_id.in_(uids)).all()} if uids else {}
+    videos = creator_bonus.video_rows(db, ids)
     # Feedback 2026-11-10: show the creator's previous submission time and the gap in days.
     prev_at = {}
     for r in rs:
@@ -299,6 +327,11 @@ def _recon_rows(db, rs):
             "approved_units": int(r.approved_units) if r.approved_units is not None else None,
             "reject_reason": r.reject_reason, "submitted_at": _iso(r.submitted_at), "reviewed_at": _iso(r.reviewed_at),
             "wallet_tx_id": r.wallet_tx_id,
+            # Bonus policy 2026-11-19 (NULL on older submissions).
+            "views_reward_raw_usd": r.views_reward_raw_usd, "views_reward_usd": r.views_reward_usd,
+            "tier_bonus_usd": r.tier_bonus_usd, "video_reward_usd": r.video_reward_usd,
+            "videos": [{"id": v.id, "url": v.url, "status": v.status, "reward_usd": v.reward_usd}
+                       for v in videos.get(r.id, [])],
             "items": [{
                 "channel_id": it.channel_id,
                 "channel_name": chans[it.channel_id].channel_name if it.channel_id in chans else "",
@@ -309,6 +342,8 @@ def _recon_rows(db, rs):
                 "submitted_total": int(it.submitted_total), "period_views": int(it.period_views),
                 "views_date": _iso(it.views_date), "rate_per_k": it.rate_per_k, "estimated_usd": it.estimated_usd,
                 "proof_urls": proof_list(it.proof_urls),
+                "tier_views": int(it.tier_views) if it.tier_views is not None else None,
+                "tier_bonus_usd": it.tier_bonus_usd,
             } for it in items.get(r.id, [])],
         })
     return out
@@ -477,9 +512,15 @@ async def mark_under_review(rid: int, db: Session = Depends(get_db), admin: User
     return {"ok": True}
 
 
+class ApproveReconIn(BaseModel):
+    # Individual Video Bonus: ids of the video links the admin accepts; the other pending
+    # links of this submission are rejected. None (older admin UI) = accept all.
+    approved_video_ids: Optional[List[int]] = None
+
+
 @router.post("/reconciliations/{rid}/approve")
-async def approve_reconciliation(rid: int, bg: BackgroundTasks, db: Session = Depends(get_db),
-                                 admin: User = Depends(get_current_admin)):
+async def approve_reconciliation(rid: int, bg: BackgroundTasks, payload: Optional[ApproveReconIn] = None,
+                                 db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
     r = db.query(CreatorReconciliation).filter(CreatorReconciliation.id == rid).first()
     if not r:
         raise HTTPException(status_code=404, detail="Không tìm thấy yêu cầu đối soát.")
@@ -497,7 +538,19 @@ async def approve_reconciliation(rid: int, bg: BackgroundTasks, db: Session = De
                     f"Mốc views đã duyệt của kênh '{ch.channel_name}' đã thay đổi kể từ khi gửi — hãy từ chối và để creator gửi lại."))
             ch.approved_total_views = int(it.submitted_total)
             ch.updated_at = now()
-        usd = round(sum(float(it.estimated_usd or 0) for it in items), 2)
+        if r.views_reward_usd is None:      # submitted before the bonus policy (2026-11-19)
+            usd = round(sum(float(it.estimated_usd or 0) for it in items), 2)
+        else:
+            vids = (db.query(CreatorVideoLink)
+                    .filter(CreatorVideoLink.reconciliation_id == rid, CreatorVideoLink.status == "pending").all())
+            keep = None if payload is None or payload.approved_video_ids is None else set(payload.approved_video_ids)
+            video_usd = 0.0
+            for v in vids:
+                ok = keep is None or v.id in keep
+                v.status, v.reviewed_at = ("approved" if ok else "rejected"), now()
+                if ok:
+                    video_usd += float(v.reward_usd or 0)
+            usd = round(float(r.views_reward_usd or 0) + float(r.tier_bonus_usd or 0) + video_usd, 2)
         units = usd_to_units(usd)
         tx_id = None
         if units > 0:
@@ -530,6 +583,7 @@ async def reject_reconciliation(rid: int, payload: ReasonIn, bg: BackgroundTasks
     if not _claim(db, rid, "rejected", admin.user_id, {"reject_reason": reason}):
         db.rollback()
         raise HTTPException(status_code=400, detail="Yêu cầu này đã được xử lý rồi.")
+    creator_bonus.release_videos(db, rid)
     db.commit()
     r = db.query(CreatorReconciliation).filter(CreatorReconciliation.id == rid).first()
     to, name = _contact(db, db.query(User).filter(User.user_id == r.user_id).first() if r else None)
@@ -588,3 +642,30 @@ async def leaderboard(period: str = Query("lifetime", pattern="^(lifetime|monthl
         r["username"], r["email"] = (u.username, u.email) if u else (None, None)
     data["months"] = available_months(db)
     return data
+
+
+# ── Bonus settings (policy 2026-11-19) ───────────────────────────────────────
+
+class BonusSettingsIn(BaseModel):
+    tiers: List[List[float]]
+    tier_max_usd: float
+    video_min_views: int
+    video_reward_usd: float
+    monthly_cap_usd: float
+
+
+@router.get("/bonus-settings")
+async def get_bonus_settings(db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
+    return {**creator_bonus.get_config(db), "defaults": creator_bonus.DEFAULTS, "max_tiers": creator_bonus.MAX_TIERS}
+
+
+@router.put("/bonus-settings")
+async def put_bonus_settings(payload: BonusSettingsIn, db: Session = Depends(get_db),
+                             admin: User = Depends(get_current_admin)):
+    """New values apply to submissions sent from now on; earlier ones keep their amounts."""
+    try:
+        cfg = creator_bonus.save_config(db, payload.dict())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Cấu hình không hợp lệ: {e}")
+    db.commit()
+    return cfg
