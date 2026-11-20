@@ -27,6 +27,9 @@ METHOD_LIMITS = {
     "CREDIT_CARD": (10000, 200000000),
     "APPLE_PAY": (10000, 100000000),
     "GOOGLE_PAY": (10000, 100000000),
+    # Vietnamese customers: bank transfer and VietQR / VietQR Global (same IPN payload, no card_info)
+    "COLLECTION": (10000, 200000000),   # docs: max = the paying bank's own limit
+    "QR_PAY": (10000, 500000000),
 }
 
 
