@@ -651,6 +651,7 @@ class BonusSettingsIn(BaseModel):
     tier_max_usd: float
     video_min_views: int
     video_reward_usd: float
+    video_max_per_month: int = 30
     monthly_cap_usd: float
 
 

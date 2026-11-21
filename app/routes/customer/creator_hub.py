@@ -200,6 +200,7 @@ async def list_channels(db: Session = Depends(get_db), current: User = Depends(r
                                          "period_views": int(it.period_views),
                                          "channel_type": it.channel_type,
                                          "estimated_usd": it.estimated_usd}
+    bonus_cfg = creator_bonus.get_config(db)
     return {
         "channels": [_channel_dict(c, open_items) for c in rows],
         "platforms": [{"key": k, "label": v} for k, v in PLATFORMS.items()],
@@ -210,7 +211,11 @@ async def list_channels(db: Session = Depends(get_db), current: User = Depends(r
         "min_days_between": SUBMIT_MIN_DAYS,
         "next_submit_at": _iso(next_submit_at(db, current.user_id)),
         # Eligibility only; bonus tiers / amounts are not shown to creators (policy 2026-11-19).
-        "video_min_views": creator_bonus.get_config(db)["video_min_views"],
+        "video_min_views": bonus_cfg["video_min_views"],
+        # "Individual Video Bonus (Maximum 30 videos)" per calendar month (adjustment 2026-11-21)
+        "video_max_per_month": bonus_cfg["video_max_per_month"],
+        "videos_left_this_month": max(0, bonus_cfg["video_max_per_month"]
+                                      - creator_bonus.videos_used_this_month(db, current.user_id, now())),
     }
 
 
@@ -460,6 +465,70 @@ async def check_videos(payload: VideoCheckIn, db: Session = Depends(get_db), cur
     return {"duplicates": dup}
 
 
+@router.post("/reconciliations/preview")
+def preview_reconciliation(payload: ReconIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+    """Live estimate shown under the form while the creator types (adjustment 2026-11-21).
+    Same pricing as submit_reconciliation; lines that are not valid yet are skipped."""
+    channels = {c.id: c for c in db.query(CreatorChannel).filter(CreatorChannel.user_id == current.user_id).all()}
+    approved = [c for c in channels.values() if c.status == "approved"]
+    if len(approved) == 1:
+        primary_id = approved[0].id
+    else:
+        primary_id = payload.primary_channel_id or next((c.id for c in approved if c.is_primary), None)
+    lines, seen = [], set()
+    for it in payload.items:
+        c = channels.get(it.channel_id)
+        if not c or c.status != "approved" or c.id in seen:
+            continue
+        seen.add(c.id)
+        prev = int(c.approved_total_views or 0)
+        period = max(0, int(it.total_views) - prev)
+        ctype = "primary" if c.id == primary_id else "secondary"
+        lines.append({"channel_id": c.id, "period_views": period, "views_usd": reward_usd(period, ctype),
+                      "type": ctype, "name": c.channel_name})
+    cfg = creator_bonus.get_config(db)
+    ts = now()
+    n_videos = len({creator_bonus.video_key(u) for u in payload.videos if (u or "").strip()})
+    left = max(0, cfg["video_max_per_month"] - creator_bonus.videos_used_this_month(db, current.user_id, ts))
+    counted = min(n_videos, left)
+    totals = creator_bonus.price_submission(db, current.user_id, ts, lines, counted, cfg)
+    by_type = {t: {"views": sum(l["period_views"] for l in lines if l["type"] == t),
+                   "usd": round(sum(l["views_usd"] for l in lines if l["type"] == t), 2)}
+               for t in ("primary", "secondary")}
+    video_usd = round(totals["video_reward_usd"] * counted, 2)
+    return {
+        "views": {**by_type, "total_views": sum(l["period_views"] for l in lines),
+                  "raw_usd": totals["views_reward_raw_usd"], "usd": totals["views_reward_usd"],
+                  "cap_usd": cfg["monthly_cap_usd"],
+                  "capped": totals["views_reward_usd"] < totals["views_reward_raw_usd"]},
+        "rates": {"primary_per_k": PRIMARY_RATE_PER_K, "secondary_per_k": SECONDARY_RATE_PER_K},
+        "channels": [{"channel_id": l["channel_id"], "channel_name": l["name"], "type": l["type"],
+                      "month_views": l["tier_views"], "milestone": creator_bonus.tier_reached(l["tier_views"], cfg),
+                      "bonus": l["tier_bonus"]} for l in lines],
+        "tier_usd": totals["tier_bonus_usd"],
+        "videos": {"count": n_videos, "counted": counted, "left": left, "max": cfg["video_max_per_month"],
+                   "min_views": cfg["video_min_views"], "reward_each": totals["video_reward_usd"], "usd": video_usd},
+        "total_usd": round(totals["views_reward_usd"] + totals["tier_bonus_usd"] + video_usd, 2),
+    }
+
+
+@router.delete("/reconciliations/{rid}")
+def delete_reconciliation(rid: int, db: Session = Depends(get_db), current: User = Depends(require_hub)):
+    """A rejected submission can be removed from the history (it paid nothing; its video
+    links were already returned when it was rejected)."""
+    r = db.query(CreatorReconciliation).filter(CreatorReconciliation.id == rid,
+                                               CreatorReconciliation.user_id == current.user_id).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Submission not found.")
+    if r.status != "rejected":
+        raise HTTPException(status_code=400, detail="Only a rejected submission can be deleted.")
+    db.query(CreatorVideoLink).filter(CreatorVideoLink.reconciliation_id == rid).delete(synchronize_session=False)
+    db.query(CreatorReconciliationItem).filter(CreatorReconciliationItem.reconciliation_id == rid).delete(synchronize_session=False)
+    db.delete(r)
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/reconciliations")
 async def submit_reconciliation(payload: ReconIn, db: Session = Depends(get_db), current: User = Depends(require_hub)):
     if not payload.items and not any((u or "").strip() for u in payload.videos):
@@ -477,6 +546,13 @@ async def submit_reconciliation(payload: ReconIn, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=(
             f"Views can be submitted once every {SUBMIT_MIN_DAYS} days. "
             f"Your next submission opens on {nxt.strftime('%d/%m/%Y')}."))
+    if video_links:
+        cfg_v = creator_bonus.get_config(db)
+        left = max(0, cfg_v["video_max_per_month"] - creator_bonus.videos_used_this_month(db, current.user_id, now()))
+        if len(video_links) > left:
+            raise HTTPException(status_code=400, detail=(
+                f"Individual Video Bonus: at most {cfg_v['video_max_per_month']} videos per month. "
+                f"You can add {left} more this month."))
     channels = {c.id: c for c in db.query(CreatorChannel).filter(CreatorChannel.user_id == current.user_id).all()}
     approved = [c for c in channels.values() if c.status == "approved"]
     if not approved:

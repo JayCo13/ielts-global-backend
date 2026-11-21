@@ -37,6 +37,7 @@ DEFAULTS = {
     "tier_max_usd": 300.0,
     "video_min_views": 1000,
     "video_reward_usd": 1.0,
+    "video_max_per_month": 30,   # adjustment 2026-11-21: "Individual Video Bonus (Maximum 30 videos)"
     "monthly_cap_usd": 600.0,
 }
 MAX_TIERS = 15            # keeps the JSON inside system_settings.setting_value (255 chars)
@@ -62,7 +63,7 @@ def get_config(db) -> dict:
         except (ValueError, TypeError):
             pass
     for key, cast in (("tier_max_usd", float), ("video_min_views", int),
-                      ("video_reward_usd", float), ("monthly_cap_usd", float)):
+                      ("video_reward_usd", float), ("video_max_per_month", int), ("monthly_cap_usd", float)):
         if rows.get(key) not in (None, ""):
             cfg[key] = _num(rows[key], cast, cfg[key])
     return cfg
@@ -89,9 +90,10 @@ def save_config(db, cfg: dict) -> dict:
         "tier_max_usd": _num(cfg.get("tier_max_usd"), float, -1),
         "video_min_views": _num(cfg.get("video_min_views"), int, -1),
         "video_reward_usd": _num(cfg.get("video_reward_usd"), float, -1),
+        "video_max_per_month": _num(cfg.get("video_max_per_month", DEFAULTS["video_max_per_month"]), int, -1),
         "monthly_cap_usd": _num(cfg.get("monthly_cap_usd"), float, -1),
     }
-    for k in ("tier_max_usd", "video_min_views", "video_reward_usd", "monthly_cap_usd"):
+    for k in ("tier_max_usd", "video_min_views", "video_reward_usd", "video_max_per_month", "monthly_cap_usd"):
         if values[k] < 0:
             raise ValueError(f"Invalid value for {k}.")
     if len(values["tiers"]) > 255:
@@ -112,6 +114,7 @@ def get_config_from_values(values: dict) -> dict:
     return {"tiers": json.loads(values["tiers"]), "tier_max_usd": float(values["tier_max_usd"]),
             "video_min_views": int(values["video_min_views"]),
             "video_reward_usd": float(values["video_reward_usd"]),
+            "video_max_per_month": int(values["video_max_per_month"]),
             "monthly_cap_usd": float(values["monthly_cap_usd"])}
 
 
@@ -124,6 +127,11 @@ def tier_amount(views: int, cfg: dict) -> float:
         if views >= threshold:
             best = max(best, float(usd))
     return round(min(best, float(cfg["tier_max_usd"])), 2)
+
+
+def tier_reached(views: int, cfg: dict) -> int:
+    """Views threshold of the highest tier reached (0 when none)."""
+    return max([int(t) for t, _usd in cfg["tiers"] if views >= t] or [0])
 
 
 def month_range(ts: datetime) -> Tuple[datetime, datetime]:
@@ -253,6 +261,17 @@ def video_rows(db, reconciliation_ids: List[int]) -> Dict[int, list]:
                   .order_by(CreatorVideoLink.id).all()):
             out.setdefault(v.reconciliation_id, []).append(v)
     return out
+
+
+def videos_used_this_month(db, user_id: int, ts: datetime) -> int:
+    """Video links counted against `video_max_per_month`: links in this month's non-rejected
+    submissions that are pending or approved (rejected / returned links don't count)."""
+    ids = [r.id for r in _month_recons(db, user_id, ts)]
+    if not ids:
+        return 0
+    return db.query(func.count(CreatorVideoLink.id)).filter(
+        CreatorVideoLink.reconciliation_id.in_(ids),
+        CreatorVideoLink.status.in_(("pending", "approved"))).scalar() or 0
 
 
 def approved_count(db, reconciliation_id: int) -> int:
